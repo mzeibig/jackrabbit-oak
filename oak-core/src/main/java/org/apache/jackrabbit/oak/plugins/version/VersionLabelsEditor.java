@@ -21,9 +21,12 @@ import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Tree;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.DefaultEditor;
 import org.apache.jackrabbit.oak.spi.commit.Editor;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
+
+import javax.annotation.Nonnull;
 
 import static org.apache.jackrabbit.JcrConstants.JCR_ROOTVERSION;
 import static org.apache.jackrabbit.oak.api.CommitFailedException.CONSTRAINT;
@@ -36,11 +39,14 @@ class VersionLabelsEditor extends DefaultEditor {
 
     private final String path;
     private final ReadWriteVersionManager vMgr;
+    private final CommitInfo commitInfo;
 
     VersionLabelsEditor(String labelsPath,
-                        ReadWriteVersionManager versionManager) {
+                        ReadWriteVersionManager versionManager,
+                        @Nonnull CommitInfo commitInfo) {
         this.path = labelsPath;
         this.vMgr = versionManager;
+        this.commitInfo = commitInfo;
     }
 
     @Override
@@ -79,19 +85,21 @@ class VersionLabelsEditor extends DefaultEditor {
 
     private void validateLabel(PropertyState label)
             throws CommitFailedException {
-        String identifier = label.getValue(Type.REFERENCE);
-        Tree version = vMgr.getVersion(identifier);
-        if (version == null) {
-            throw new CommitFailedException(CONSTRAINT, 0,
-                    "Version label references unknown node");
-        }
-        String parent = PathUtils.getAncestorPath(path, 1);
-        String versionName = version.getName();
-        if (versionName.equals(JCR_ROOTVERSION)
-                || !PathUtils.isAncestor(parent, version.getPath())) {
-            throw new CommitFailedException(CommitFailedException.VERSION,
-                    VersionExceptionCode.NO_SUCH_VERSION.ordinal(),
-                    "Not a valid version on this history: " + versionName);
+        if (!"import".equals(commitInfo.getInfo().get("user-data"))) {
+            String identifier = label.getValue(Type.REFERENCE);
+            Tree version = vMgr.getVersion(identifier);
+            if (version == null) {
+                throw new CommitFailedException(CONSTRAINT, 0,
+                        "Version label references unknown node");
+            }
+            String parent = PathUtils.getAncestorPath(path, 1);
+            String versionName = version.getName();
+            if (versionName.equals(JCR_ROOTVERSION)
+                    || !PathUtils.isAncestor(parent, version.getPath())) {
+                throw new CommitFailedException(CommitFailedException.VERSION,
+                        VersionExceptionCode.NO_SUCH_VERSION.ordinal(),
+                        "Not a valid version on this history: " + versionName);
+            }
         }
     }
 }

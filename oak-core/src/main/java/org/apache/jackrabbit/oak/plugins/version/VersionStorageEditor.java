@@ -20,6 +20,7 @@ import javax.annotation.Nonnull;
 
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
+import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.DefaultEditor;
 import org.apache.jackrabbit.oak.spi.commit.Editor;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
@@ -47,21 +48,25 @@ class VersionStorageEditor extends DefaultEditor {
     private final NodeBuilder builder;
     private final String path;
     private ReadWriteVersionManager vMgr;
+    private final CommitInfo commitInfo;
 
     VersionStorageEditor(@Nonnull NodeBuilder versionStorageNode,
-                         @Nonnull NodeBuilder workspaceRoot) {
+                         @Nonnull NodeBuilder workspaceRoot,
+                         @Nonnull CommitInfo commitInfo) {
         this(versionStorageNode, workspaceRoot, versionStorageNode,
-                VERSION_STORE_PATH);
+                VERSION_STORE_PATH, commitInfo);
     }
 
     private VersionStorageEditor(@Nonnull NodeBuilder versionStorageNode,
                                  @Nonnull NodeBuilder workspaceRoot,
                                  @Nonnull NodeBuilder builder,
-                                 @Nonnull String path) {
+                                 @Nonnull String path,
+                                 @Nonnull CommitInfo commitInfo) {
         this.versionStorageNode = checkNotNull(versionStorageNode);
         this.workspaceRoot = checkNotNull(workspaceRoot);
         this.builder = checkNotNull(builder);
         this.path = checkNotNull(path);
+        this.commitInfo = commitInfo;
     }
 
     @Override
@@ -73,13 +78,13 @@ class VersionStorageEditor extends DefaultEditor {
         String p = concat(path, name);
         if (d == VERSION_HISTORY_DEPTH
                 && name.equals(JCR_VERSIONLABELS)) {
-            return new VersionLabelsEditor(p, getVersionManager());
+            return new VersionLabelsEditor(p, getVersionManager(), commitInfo);
         }
         if (d < VERSION_HISTORY_DEPTH && !isVersionStorageNode(after)) {
             return null;
         }
         return new VersionStorageEditor(versionStorageNode, workspaceRoot,
-                builder.child(name), p);
+                builder.child(name), p, commitInfo);
     }
 
     @Override
@@ -88,8 +93,9 @@ class VersionStorageEditor extends DefaultEditor {
         int d = getDepth(path);
         // allow child nodes under version storage node, unless an attempt
         // is made to create rep:versionStorage nodes manually.
-        if (d == getDepth(VERSION_STORE_PATH) &&
-                !isVersionStorageNode(after)) {
+        if ((d == getDepth(VERSION_STORE_PATH) &&
+                !isVersionStorageNode(after))
+                || "import".equals(commitInfo.getInfo().get("user-data"))) {
             return null;
         }
         return throwProtected(name);
@@ -99,14 +105,14 @@ class VersionStorageEditor extends DefaultEditor {
     public Editor childNodeDeleted(String name, NodeState before)
             throws CommitFailedException {
         int d = getDepth(path);
-        if (d == VERSION_HISTORY_DEPTH) {
+        if (d == VERSION_HISTORY_DEPTH && !"import".equals(commitInfo.getInfo().get("user-data"))) {
             // restore version on builder
             builder.setChildNode(name, before);
             String relPath = relativize(VERSION_STORE_PATH, concat(path, name));
             // let version manager remove it properly
             getVersionManager().removeVersion(relPath);
             return null;
-        } else if (isVersionStorageNode(before) || d > VERSION_HISTORY_DEPTH) {
+        } else if ((isVersionStorageNode(before) || d > VERSION_HISTORY_DEPTH) && !"import".equals(commitInfo.getInfo().get("user-data"))) {
             throwProtected(name);
         }
         return null;
@@ -115,7 +121,7 @@ class VersionStorageEditor extends DefaultEditor {
     @Override
     public void propertyAdded(PropertyState after)
             throws CommitFailedException {
-        if (getDepth(path) < VERSION_HISTORY_DEPTH) {
+        if ((getDepth(path) < VERSION_HISTORY_DEPTH)||"import".equals(commitInfo.getInfo().get("user-data"))) {
             return;
         }
         throwProtected(after.getName());
@@ -124,7 +130,7 @@ class VersionStorageEditor extends DefaultEditor {
     @Override
     public void propertyChanged(PropertyState before, PropertyState after)
             throws CommitFailedException {
-        if (getDepth(path) < VERSION_HISTORY_DEPTH) {
+        if ((getDepth(path) < VERSION_HISTORY_DEPTH) || "import".equals(commitInfo.getInfo().get("user-data"))) {
             return;
         }
         throwProtected(before.getName());
@@ -133,7 +139,7 @@ class VersionStorageEditor extends DefaultEditor {
     @Override
     public void propertyDeleted(PropertyState before)
             throws CommitFailedException {
-        if (getDepth(path) < VERSION_HISTORY_DEPTH) {
+        if ((getDepth(path) < VERSION_HISTORY_DEPTH) || "import".equals(commitInfo.getInfo().get("user-data"))) {
             return;
         }
         throwProtected(before.getName());

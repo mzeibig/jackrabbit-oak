@@ -49,7 +49,7 @@ public class VersionEditorProvider implements EditorProvider {
         return new VisibleEditor(new CompositeEditor(
                 new VersionEditor(versionStorage, builder, info),
                 new SubtreeEditor(
-                        new VersionStorageEditor(versionStorage, builder),
+                        new VersionStorageEditor(versionStorage, builder, info),
                             JCR_SYSTEM, JCR_VERSIONSTORAGE)));
     }
 
