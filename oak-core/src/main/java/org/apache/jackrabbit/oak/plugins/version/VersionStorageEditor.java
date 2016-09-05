@@ -20,6 +20,7 @@ import javax.annotation.Nonnull;
 
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
+import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.DefaultEditor;
 import org.apache.jackrabbit.oak.spi.commit.Editor;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
@@ -47,21 +48,25 @@ class VersionStorageEditor extends DefaultEditor {
     private final NodeBuilder builder;
     private final String path;
     private ReadWriteVersionManager vMgr;
+    private CommitInfo info;
 
     VersionStorageEditor(@Nonnull NodeBuilder versionStorageNode,
-                         @Nonnull NodeBuilder workspaceRoot) {
+                         @Nonnull NodeBuilder workspaceRoot,
+                         CommitInfo info) {
         this(versionStorageNode, workspaceRoot, versionStorageNode,
-                VERSION_STORE_PATH);
+                VERSION_STORE_PATH, info);
     }
 
     private VersionStorageEditor(@Nonnull NodeBuilder versionStorageNode,
                                  @Nonnull NodeBuilder workspaceRoot,
                                  @Nonnull NodeBuilder builder,
-                                 @Nonnull String path) {
+                                 @Nonnull String path,
+                                 CommitInfo info) {
         this.versionStorageNode = checkNotNull(versionStorageNode);
         this.workspaceRoot = checkNotNull(workspaceRoot);
         this.builder = checkNotNull(builder);
         this.path = checkNotNull(path);
+        this.info = info;
     }
 
     @Override
@@ -79,7 +84,7 @@ class VersionStorageEditor extends DefaultEditor {
             return null;
         }
         return new VersionStorageEditor(versionStorageNode, workspaceRoot,
-                builder.child(name), p);
+                builder.child(name), p, info);
     }
 
     @Override
@@ -155,6 +160,10 @@ class VersionStorageEditor extends DefaultEditor {
     }
 
     private Editor throwProtected(String name) throws CommitFailedException {
-        return Utils.throwProtected(concat(path, name));
+        if ("import".equals(info.getInfo().get("user-data"))) {
+            return null;
+        } else {
+            return Utils.throwProtected(concat(path, name));
+        }
     }
 }

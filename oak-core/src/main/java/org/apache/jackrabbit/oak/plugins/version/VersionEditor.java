@@ -249,9 +249,13 @@ class VersionEditor implements Editor {
                 VersionExceptionCode.NODE_CHECKED_IN.ordinal(), msg);
     }
 
-    private static void throwProtected(String name)
+    private void throwProtected(String name)
             throws CommitFailedException {
-        throw new CommitFailedException(CommitFailedException.CONSTRAINT, 100,
-                "Property is protected: " + name);
+        if ("import".equals(commitInfo.getInfo().get("user-data"))) {
+            return;
+        } else {
+            throw new CommitFailedException(CommitFailedException.CONSTRAINT, 100,
+                    "Property is protected: " + name);
+        }
     }
 }

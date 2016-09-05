@@ -28,6 +28,7 @@
   </parent>
 
   <artifactId>oak-core</artifactId>
+  <version>1.5.7-20160902</version>
   <name>Oak Core</name>
   <packaging>bundle</packaging>
 
@@ -166,24 +167,24 @@
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-commons</artifactId>
-      <version>${project.version}</version>
+      <version>1.5.7</version>
     </dependency>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-commons</artifactId>
-      <version>${project.version}</version>
+      <version>1.5.7</version>
       <type>test-jar</type>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-blob</artifactId>
-      <version>${project.version}</version>
+      <version>1.5.7</version>
     </dependency>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-blob-cloud</artifactId>
-      <version>${project.version}</version>
+      <version>1.5.7</version>
       <optional>true</optional>
     </dependency>
     <!-- General utility libraries -->
@@ -317,7 +318,7 @@
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-blob</artifactId>
-      <version>${project.version}</version>
+      <version>1.5.7</version>
       <classifier>tests</classifier>
       <scope>test</scope>
     </dependency>
