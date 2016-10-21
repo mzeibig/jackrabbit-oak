@@ -32,6 +32,17 @@
   <name>Oak Core</name>
   <packaging>bundle</packaging>
 
+  <distributionManagement>
+    <repository>
+      <id>archiva</id>
+      <url>https://build.ist-software.com/archiva/repository/releases/</url>
+    </repository>
+    <snapshotRepository>
+      <id>archiva</id>
+      <url>https://build.ist-software.com/archiva/repository/snapshots/</url>
+    </snapshotRepository>
+  </distributionManagement>
+
   <build>
     <plugins>
       <plugin>
