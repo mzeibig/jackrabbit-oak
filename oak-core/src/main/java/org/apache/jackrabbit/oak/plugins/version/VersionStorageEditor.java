@@ -78,7 +78,7 @@ class VersionStorageEditor extends DefaultEditor {
         String p = concat(path, name);
         if (d == VERSION_HISTORY_DEPTH
                 && name.equals(JCR_VERSIONLABELS)) {
-            return new VersionLabelsEditor(p, getVersionManager());
+            return new VersionLabelsEditor(p, getVersionManager(), info);
         }
         if (d < VERSION_HISTORY_DEPTH && !isVersionStorageNode(after)) {
             return null;
