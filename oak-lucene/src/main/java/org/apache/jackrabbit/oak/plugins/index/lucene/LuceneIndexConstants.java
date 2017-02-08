@@ -16,13 +16,25 @@
  */
 package org.apache.jackrabbit.oak.plugins.index.lucene;
 
-import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.lucene.analysis.Analyzer;
-import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.analysis.util.AbstractAnalysisFactory;
 import org.apache.lucene.util.Version;
 
 public interface LuceneIndexConstants {
+
+    enum IndexingMode {
+        SYNC,
+        NRT,
+        ASYNC;
+
+        public String asyncValueName(){
+            return name().toLowerCase();
+        }
+
+        public static IndexingMode from(String indexingMode){
+            return valueOf(indexingMode.toUpperCase());
+        }
+    }
 
     String TYPE_LUCENE = "lucene";
 
@@ -328,6 +340,13 @@ public interface LuceneIndexConstants {
     String PROP_SECURE_FACETS = "secure";
 
     /**
+     * Optional (index definition) property indicating max number of facets that will be retrieved
+     * in query
+     * Default is {@link IndexDefinition#DEFAULT_FACET_COUNT}
+     */
+    String PROP_FACETS_TOP_CHILDREN = "topChildren";
+
+    /**
      * Optional (property definition) property indicating whether facets should be created
      * for this property
      */
@@ -337,4 +356,14 @@ public interface LuceneIndexConstants {
      * Boolean property indicate that property should not be included in aggregation
      */
     String PROP_EXCLUDE_FROM_AGGREGATE = "excludeFromAggregation";
+
+    /**
+     * String property: the function to index, for function-based index
+     */
+    String PROP_FUNCTION = "function";
+
+    /**
+     * Boolean property which signal LuceneIndexEditor to refresh the stored index definition
+     */
+    String PROP_REFRESH_DEFN = "refresh";
 }

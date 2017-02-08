@@ -17,6 +17,7 @@
 package org.apache.jackrabbit.oak.plugins.document;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
@@ -56,7 +57,7 @@ public class JournalEntryTest {
         RevisionVector from = new RevisionVector(new Revision(1, 0, 1));
         RevisionVector to = new RevisionVector(new Revision(2, 0, 1));
         sort.sort();
-        JournalEntry.applyTo(sort, cache, from, to);
+        JournalEntry.applyTo(sort, cache, "/", from, to);
 
         for (String p : paths) {
             String changes = cache.getChanges(from, to, p, null);
@@ -66,6 +67,29 @@ public class JournalEntryTest {
             }
         }
         sort.close();
+    }
+
+    @Test
+    public void applyToWithPath() throws Exception {
+        DiffCache cache = new MemoryDiffCache(new DocumentMK.Builder());
+        StringSort sort = JournalEntry.newSorter();
+        sort.add("/");
+        sort.add("/foo");
+        sort.add("/foo/a");
+        sort.add("/foo/b");
+        sort.add("/bar");
+        sort.add("/bar/a");
+        sort.add("/bar/b");
+        RevisionVector from = new RevisionVector(Revision.newRevision(1));
+        RevisionVector to = new RevisionVector(Revision.newRevision(1));
+        sort.sort();
+        JournalEntry.applyTo(sort, cache, "/foo", from, to);
+        assertNotNull(cache.getChanges(from, to, "/foo", null));
+        assertNotNull(cache.getChanges(from, to, "/foo/a", null));
+        assertNotNull(cache.getChanges(from, to, "/foo/b", null));
+        assertNull(cache.getChanges(from, to, "/bar", null));
+        assertNull(cache.getChanges(from, to, "/bar/a", null));
+        assertNull(cache.getChanges(from, to, "/bar/b", null));
     }
 
     //OAK-3494
@@ -98,7 +122,7 @@ public class JournalEntryTest {
         StringSort sort = JournalEntry.newSorter();
         add(sort, paths);
         sort.sort();
-        JournalEntry.applyTo(sort, cache, from, to);
+        JournalEntry.applyTo(sort, cache, "/", from, to);
 
         validateCacheUsage(cache, from, to, "/topUnchanged", true);
         validateCacheUsage(cache, from, to, "/content/changed/unchangedLeaf", true);
@@ -206,6 +230,31 @@ public class JournalEntryTest {
     }
 
     @Test
+    public void fillExternalChangesWithPath() throws Exception {
+        Revision r1 = new Revision(1, 0, 1);
+        Revision r2 = new Revision(2, 0, 1);
+        DocumentStore store = new MemoryDocumentStore();
+        JournalEntry entry = JOURNAL.newDocument(store);
+        entry.modified("/");
+        entry.modified("/foo");
+        entry.modified("/foo/a");
+        entry.modified("/foo/b");
+        entry.modified("/foo/c");
+        entry.modified("/bar");
+        entry.modified("/bar/a");
+        entry.modified("/bar/b");
+        entry.modified("/bar/c");
+
+        UpdateOp op = entry.asUpdateOp(r2);
+        assertTrue(store.create(JOURNAL, Collections.singletonList(op)));
+
+        StringSort sort = JournalEntry.newSorter();
+        JournalEntry.fillExternalChanges(sort, "/foo", r1, r2, store, null, null);
+        assertEquals(4, sort.getSize());
+        sort.close();
+    }
+
+    @Test
     public void getRevisionTimestamp() throws Exception {
         DocumentStore store = new MemoryDocumentStore();
         JournalEntry entry = JOURNAL.newDocument(store);
@@ -215,6 +264,96 @@ public class JournalEntryTest {
                 Collections.singletonList(entry.asUpdateOp(r))));
         entry = store.find(JOURNAL, JournalEntry.asId(r));
         assertEquals(r.getTimestamp(), entry.getRevisionTimestamp());
+    }
+
+    // OAK-4682
+    @Test
+    public void concurrentModification() throws Exception {
+        DocumentNodeStore store = new DocumentMK.Builder().getNodeStore();
+        try {
+            final JournalEntry entry = store.getCurrentJournalEntry();
+            Thread t = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    for (int i = 0; i < 100000; i++) {
+                        entry.modified("/node-" + i);
+                    }
+                }
+            });
+            t.start();
+            StringSort sort = JournalEntry.newSorter();
+            try {
+                entry.addTo(sort, PathUtils.ROOT_PATH);
+            } finally {
+                sort.close();
+            }
+            t.join();
+        } finally {
+            store.dispose();
+        }
+    }
+
+    @Test
+    public void addToWithPath() throws Exception {
+        DocumentStore store = new MemoryDocumentStore();
+        JournalEntry entry = JOURNAL.newDocument(store);
+        entry.modified("/");
+        entry.modified("/foo");
+        entry.modified("/foo/a");
+        entry.modified("/foo/b");
+        entry.modified("/foo/c");
+        entry.modified("/bar");
+        entry.modified("/bar/a");
+        entry.modified("/bar/b");
+        entry.modified("/bar/c");
+        StringSort sort = JournalEntry.newSorter();
+        entry.addTo(sort, "/foo");
+        assertEquals(4, sort.getSize());
+        sort.close();
+    }
+
+    @Test
+    public void countUpdatedPaths() {
+        DocumentStore store = new MemoryDocumentStore();
+        JournalEntry entry = JOURNAL.newDocument(store);
+
+        assertEquals("Incorrect number of initial paths", 0, entry.getNumChangedNodes());
+        assertFalse("Incorrect hasChanges", entry.hasChanges());
+
+        entry.modified("/foo");
+        entry.modified("/bar");
+        assertEquals("Incorrect number of paths", 2, entry.getNumChangedNodes());
+        assertTrue("Incorrect hasChanges", entry.hasChanges());
+
+        entry.modified(Arrays.asList("/foo1", "/bar1"));
+        assertEquals("Incorrect number of paths", 4, entry.getNumChangedNodes());
+        assertTrue("Incorrect hasChanges", entry.hasChanges());
+
+        entry.modified("/foo/bar2");
+        assertEquals("Incorrect number of paths", 5, entry.getNumChangedNodes());
+        assertTrue("Incorrect hasChanges", entry.hasChanges());
+
+        entry.modified("/foo3/bar3");
+        assertEquals("Incorrect number of paths", 7, entry.getNumChangedNodes());
+        assertTrue("Incorrect hasChanges", entry.hasChanges());
+
+        entry.modified(Arrays.asList("/foo/bar4", "/foo5/bar5"));
+        assertEquals("Incorrect number of paths", 10, entry.getNumChangedNodes());
+        assertTrue("Incorrect hasChanges", entry.hasChanges());
+    }
+
+    @Test
+    public void branchAdditionMarksChanges() {
+        DocumentStore store = new MemoryDocumentStore();
+        JournalEntry entry = JOURNAL.newDocument(store);
+
+        assertFalse("Incorrect hasChanges", entry.hasChanges());
+
+        entry.branchCommit(Collections.<Revision>emptyList());
+        assertFalse("Incorrect hasChanges", entry.hasChanges());
+
+        entry.branchCommit(Collections.singleton(Revision.fromString("r123-0-1")));
+        assertTrue("Incorrect hasChanges", entry.hasChanges());
     }
 
     private static void addRandomPaths(java.util.Collection<String> paths) throws IOException {

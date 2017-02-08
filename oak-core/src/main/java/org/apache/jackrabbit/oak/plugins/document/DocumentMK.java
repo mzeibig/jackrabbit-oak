@@ -18,6 +18,7 @@ package org.apache.jackrabbit.oak.plugins.document;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static org.apache.jackrabbit.oak.commons.PathUtils.concat;
+import static org.apache.jackrabbit.oak.plugins.document.util.MongoConnection.readConcernLevel;
 
 import java.io.InputStream;
 import java.net.UnknownHostException;
@@ -45,6 +46,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.mongodb.DB;
+import com.mongodb.ReadConcernLevel;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.cache.CacheLIRS;
@@ -79,12 +81,14 @@ import org.apache.jackrabbit.oak.plugins.document.rdb.RDBDocumentStore;
 import org.apache.jackrabbit.oak.plugins.document.rdb.RDBOptions;
 import org.apache.jackrabbit.oak.plugins.document.rdb.RDBVersionGCSupport;
 import org.apache.jackrabbit.oak.plugins.document.util.MongoConnection;
+import org.apache.jackrabbit.oak.plugins.document.mongo.MongoStatus;
 import org.apache.jackrabbit.oak.plugins.document.util.RevisionsKey;
 import org.apache.jackrabbit.oak.plugins.document.util.StringValue;
 import org.apache.jackrabbit.oak.spi.blob.AbstractBlobStore;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
 import org.apache.jackrabbit.oak.spi.blob.MemoryBlobStore;
+import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.stats.Clock;
 import org.apache.jackrabbit.oak.stats.StatisticsProvider;
 import org.slf4j.Logger;
@@ -125,12 +129,6 @@ public class DocumentMK {
      */
     static final boolean FAST_DIFF = Boolean.parseBoolean(
             System.getProperty("oak.documentMK.fastDiff", "true"));
-
-    /**
-     * The guava cache concurrency level.
-     */
-    static final int CACHE_CONCURRENCY = Integer.getInteger(
-            "oak.documentMK.cacheConcurrency", 16);
 
     /**
      * The node store.
@@ -287,7 +285,7 @@ public class DocumentMK {
             isBranch = baseRev != null && baseRev.isBranch();
             parseJsonDiff(commit, jsonDiff, rootPath);
             commit.apply();
-            rev = nodeStore.done(commit, isBranch, null);
+            rev = nodeStore.done(commit, isBranch, CommitInfo.EMPTY);
             success = true;
         } catch (DocumentStoreException e) {
             throw new DocumentStoreException(e);
@@ -314,7 +312,7 @@ public class DocumentMK {
             throw new DocumentStoreException("Not a branch: " + branchRevisionId);
         }
         try {
-            return nodeStore.merge(revision, null).toString();
+            return nodeStore.merge(revision, CommitInfo.EMPTY).toString();
         } catch (DocumentStoreException e) {
             throw new DocumentStoreException(e);
         } catch (CommitFailedException e) {
@@ -539,16 +537,17 @@ public class DocumentMK {
      * A builder for a DocumentMK instance.
      */
     public static class Builder {
-        private static final long DEFAULT_MEMORY_CACHE_SIZE = 256 * 1024 * 1024;
-        public static final int DEFAULT_NODE_CACHE_PERCENTAGE = 25;
+        public static final long DEFAULT_MEMORY_CACHE_SIZE = 256 * 1024 * 1024;
+        public static final int DEFAULT_NODE_CACHE_PERCENTAGE = 35;
         public static final int DEFAULT_PREV_DOC_CACHE_PERCENTAGE = 4;
-        public static final int DEFAULT_CHILDREN_CACHE_PERCENTAGE = 10;
-        public static final int DEFAULT_DIFF_CACHE_PERCENTAGE = 5;
+        public static final int DEFAULT_CHILDREN_CACHE_PERCENTAGE = 15;
+        public static final int DEFAULT_DIFF_CACHE_PERCENTAGE = 30;
         public static final int DEFAULT_CACHE_SEGMENT_COUNT = 16;
         public static final int DEFAULT_CACHE_STACK_MOVE_DISTANCE = 16;
         private DocumentNodeStore nodeStore;
         private DocumentStore documentStore;
         private String mongoUri;
+        private MongoStatus mongoStatus;
         private DiffCache diffCache;
         private BlobStore blobStore;
         private int clusterId  = Integer.getInteger("oak.documentMK.clusterId", 0);
@@ -568,6 +567,7 @@ public class DocumentMK {
         private boolean useSimpleRevision;
         private long maxReplicationLagMillis = TimeUnit.HOURS.toMillis(6);
         private boolean disableBranches;
+        private boolean prefetchExternalChanges;
         private Clock clock = Clock.SIMPLE;
         private Executor executor;
         private String persistentCacheURI = DEFAULT_PERSISTENT_CACHE_URI;
@@ -582,6 +582,9 @@ public class DocumentMK {
         private DocumentNodeStoreStatsCollector nodeStoreStatsCollector;
         private Map<CacheType, PersistentCacheStats> persistentCacheStats =
                 new EnumMap<CacheType, PersistentCacheStats>(CacheType.class);
+        private boolean bundlingDisabled;
+        private JournalPropertyHandlerFactory journalPropertyHandlerFactory =
+                new JournalPropertyHandlerFactory();
 
         public Builder() {
         }
@@ -609,10 +612,14 @@ public class DocumentMK {
             this.mongoUri = uri;
 
             DB db = new MongoConnection(uri).getDB(name);
+            MongoStatus status = new MongoStatus(db);
             if (!MongoConnection.hasWriteConcern(uri)) {
                 db.setWriteConcern(MongoConnection.getDefaultWriteConcern(db));
             }
-            setMongoDB(db, blobCacheSizeMB);
+            if (status.isMajorityReadConcernSupported() && status.isMajorityReadConcernEnabled() && !MongoConnection.hasReadConcern(uri)) {
+                db.setReadConcern(MongoConnection.getDefaultReadConcern(db));
+            }
+            setMongoDB(db, status, blobCacheSizeMB);
             return this;
         }
 
@@ -624,24 +631,47 @@ public class DocumentMK {
          */
         public Builder setMongoDB(@Nonnull DB db,
                                   int blobCacheSizeMB) {
+            return setMongoDB(db, new MongoStatus(db), blobCacheSizeMB);
+        }
+
+        private Builder setMongoDB(@Nonnull DB db,
+                                   MongoStatus status,
+                                   int blobCacheSizeMB) {
             if (!MongoConnection.hasSufficientWriteConcern(db)) {
                 LOG.warn("Insufficient write concern: " + db.getWriteConcern()
                         + " At least " + MongoConnection.getDefaultWriteConcern(db) + " is recommended.");
             }
+            if (status.isMajorityReadConcernSupported() && !status.isMajorityReadConcernEnabled()) {
+                LOG.warn("The read concern should be enabled on mongod using --enableMajorityReadConcern");
+            } else if (status.isMajorityReadConcernSupported() && !MongoConnection.hasSufficientReadConcern(db)) {
+                ReadConcernLevel currentLevel = readConcernLevel(db.getReadConcern());
+                ReadConcernLevel recommendedLevel = readConcernLevel(MongoConnection.getDefaultReadConcern(db));
+                if (currentLevel == null) {
+                    LOG.warn("Read concern hasn't been set. At least " + recommendedLevel + " is recommended.");
+                } else {
+                    LOG.warn("Insufficient read concern: " + currentLevel + ". At least " + recommendedLevel + " is recommended.");
+                }
+            }
+
+            this.mongoStatus = status;
             if (this.documentStore == null) {
                 this.documentStore = new MongoDocumentStore(db, this);
             }
 
             if (this.blobStore == null) {
                 GarbageCollectableBlobStore s = new MongoBlobStore(db, blobCacheSizeMB * 1024 * 1024L);
-                configureBlobStore(s);
-                PersistentCache p = getPersistentCache();
-                if (p != null) {
-                    s = p.wrapBlobStore(s);
-                }
-                this.blobStore = s;
+                setBlobStore(s);
             }
             return this;
+        }
+
+        private void setBlobStore(GarbageCollectableBlobStore s) {
+            configureBlobStore(s);
+            PersistentCache p = getPersistentCache();
+            if (p != null) {
+                s = p.wrapBlobStore(s);
+            }
+            this.blobStore = s;
         }
 
         /**
@@ -665,6 +695,16 @@ public class DocumentMK {
         }
 
         /**
+         * Returns the status of the Mongo server configured in the {@link #setMongoDB(String, String, int)} method.
+         *
+         * @return the status or null if the {@link #setMongoDB(String, String, int)} method hasn't
+         * been called.
+         */
+        public MongoStatus getMongoStatus() {
+            return mongoStatus;
+        }
+
+        /**
          * Sets a {@link DataSource} to use for the RDB document and blob
          * stores.
          *
@@ -683,9 +723,9 @@ public class DocumentMK {
          */
         public Builder setRDBConnection(DataSource ds, RDBOptions options) {
             this.documentStore = new RDBDocumentStore(ds, this, options);
-            if(this.blobStore == null) {
-                this.blobStore = new RDBBlobStore(ds, options);
-                configureBlobStore(blobStore);
+            if(blobStore == null) {
+                GarbageCollectableBlobStore s = new RDBBlobStore(ds, options);
+                setBlobStore(s);
             }
             return this;
         }
@@ -698,8 +738,10 @@ public class DocumentMK {
          */
         public Builder setRDBConnection(DataSource documentStoreDataSource, DataSource blobStoreDataSource) {
             this.documentStore = new RDBDocumentStore(documentStoreDataSource, this);
-            this.blobStore = new RDBBlobStore(blobStoreDataSource);
-            configureBlobStore(blobStore);
+            if(blobStore == null) {
+                GarbageCollectableBlobStore s = new RDBBlobStore(blobStoreDataSource);
+                setBlobStore(s);
+            }
             return this;
         }
 
@@ -1027,6 +1069,33 @@ public class DocumentMK {
             return disableBranches;
         }
 
+        public Builder setBundlingDisabled(boolean enabled) {
+            bundlingDisabled = enabled;
+            return this;
+        }
+
+        public boolean isBundlingDisabled() {
+            return bundlingDisabled;
+        }
+
+        public Builder setPrefetchExternalChanges(boolean b) {
+            prefetchExternalChanges = b;
+            return this;
+        }
+
+        public boolean isPrefetchExternalChanges() {
+            return prefetchExternalChanges;
+        }
+
+        public Builder setJournalPropertyHandlerFactory(JournalPropertyHandlerFactory factory) {
+            journalPropertyHandlerFactory = factory;
+            return this;
+        }
+
+        public JournalPropertyHandlerFactory getJournalPropertyHandlerFactory() {
+            return journalPropertyHandlerFactory;
+        }
+
         VersionGCSupport createVersionGCSupport() {
             DocumentStore store = getDocumentStore();
             if (store instanceof MongoDocumentStore) {
@@ -1073,8 +1142,8 @@ public class DocumentMK {
             return buildCache(CacheType.NODE, getNodeCacheSize(), store, null);
         }
 
-        public Cache<PathRev, DocumentNodeState.Children> buildChildrenCache() {
-            return buildCache(CacheType.CHILDREN, getChildrenCacheSize(), null, null);
+        public Cache<PathRev, DocumentNodeState.Children> buildChildrenCache(DocumentNodeStore store) {
+            return buildCache(CacheType.CHILDREN, getChildrenCacheSize(), store, null);
         }
 
         public Cache<PathRev, StringValue> buildMemoryDiffCache() {
@@ -1200,7 +1269,7 @@ public class DocumentMK {
                         build();
             }
             return CacheBuilder.newBuilder().
-                    concurrencyLevel(CACHE_CONCURRENCY).
+                    concurrencyLevel(cacheSegmentCount).
                     weigher(weigher).
                     maximumWeight(maxWeight).
                     recordStats().

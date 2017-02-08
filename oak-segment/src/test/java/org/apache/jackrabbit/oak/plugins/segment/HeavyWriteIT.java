@@ -37,7 +37,6 @@ import javax.annotation.Nonnull;
 
 import com.google.common.collect.ImmutableList;
 import org.apache.jackrabbit.oak.api.Blob;
-import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.commons.FixturesHelper;
 import org.apache.jackrabbit.oak.commons.FixturesHelper.Fixture;
 import org.apache.jackrabbit.oak.plugins.segment.compaction.CompactionStrategy;
@@ -82,7 +81,7 @@ public class HeavyWriteIT {
     }
 
     @Test
-    public void heavyWrite() throws IOException, CommitFailedException, InterruptedException {
+    public void heavyWrite() throws Exception {
         final FileStore store = FileStore.builder(getFileStoreFolder()).withMaxFileSize(128).withMemoryMapping(false).build();
         final SegmentNodeStore nodeStore = SegmentNodeStore.builder(store).build();
         CompactionStrategy custom = new CompactionStrategy(false, false,

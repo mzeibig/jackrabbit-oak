@@ -29,14 +29,19 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
+import com.google.common.collect.Iterators;
+import com.google.common.io.Closer;
+import org.apache.commons.io.FileUtils;
 import org.apache.jackrabbit.core.data.DataRecord;
 import org.apache.jackrabbit.core.data.DataStoreException;
+import org.apache.jackrabbit.oak.commons.FileIOUtils;
 import org.apache.jackrabbit.oak.commons.concurrent.ExecutorCloser;
 import org.apache.jackrabbit.oak.plugins.blob.SharedDataStore;
 
 import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -65,6 +70,7 @@ public class BlobIdTrackerTest {
     File root;
     SharedDataStore dataStore;
     BlobIdTracker tracker;
+    Closer closer = Closer.create();
 
     @Rule
     public TemporaryFolder folder = new TemporaryFolder(new File("target"));
@@ -84,18 +90,18 @@ public class BlobIdTrackerTest {
     public void setup() throws Exception {
         this.root = folder.newFolder();
         if (dataStore == null) {
-            dataStore = getBlobStore(root);
+            dataStore = getBlobStore(folder.newFolder());
         }
         this.repoId = randomUUID().toString();
         this.tracker = new BlobIdTracker(root.getAbsolutePath(), repoId, 100 * 60, dataStore);
         this.scheduler = newSingleThreadScheduledExecutor();
+        closer.register(tracker);
+        closer.register(new ExecutorCloser(scheduler));
     }
 
     @After
     public void tearDown() throws IOException {
-        tracker.close();
-        new ExecutorCloser(scheduler).close();
-        folder.delete();
+        closer.close();
     }
 
     @Test
@@ -127,8 +133,13 @@ public class BlobIdTrackerTest {
     @Test
     public void snapshotRetrieveIgnored() throws Exception {
         System.setProperty("oak.datastore.skipTracker", "true");
+
+        // Close and open a new object to use the system property
+        closer.close();
         this.tracker = new BlobIdTracker(root.getAbsolutePath(), repoId, 100 * 60, dataStore);
         this.scheduler = newSingleThreadScheduledExecutor();
+        closer.register(tracker);
+        closer.register(new ExecutorCloser(scheduler));
 
         try {
             Set<String> initAdd = add(tracker, range(0, 10000));
@@ -145,9 +156,40 @@ public class BlobIdTrackerTest {
         } finally {
             //reset the skip tracker system prop
             System.clearProperty("oak.datastore.skipTracker");
-            this.tracker = new BlobIdTracker(root.getAbsolutePath(), repoId, 100 * 60, dataStore);
-            this.scheduler = newSingleThreadScheduledExecutor();
         }
+    }
+
+    @Test
+    public void externalAddOffline() throws Exception {
+        // Close and open a new object to use the system property
+        closer.close();
+
+        root = folder.newFolder();
+        File blobIdRoot = new File(root, "blobids");
+        blobIdRoot.mkdirs();
+
+        //Add file offline
+        File offline = new File(blobIdRoot, "blob-offline123456.gen");
+        List<String> offlineLoad = range(0, 1000);
+        FileIOUtils.writeStrings(offlineLoad.iterator(), offline, false);
+
+        this.tracker = new BlobIdTracker(root.getAbsolutePath(), repoId, 100 * 60, dataStore);
+        this.scheduler = newSingleThreadScheduledExecutor();
+        closer.register(tracker);
+        closer.register(new ExecutorCloser(scheduler));
+
+        Set<String> initAdd = add(tracker, range(1001, 1005));
+        ScheduledFuture<?> scheduledFuture =
+            scheduler.schedule(tracker.new SnapshotJob(), 0, TimeUnit.MILLISECONDS);
+        scheduledFuture.get();
+        initAdd.addAll(offlineLoad);
+
+        assertEquals(initAdd.size(),
+            Iterators.size(FileUtils.lineIterator(tracker.store.getBlobRecordsFile())));
+
+        Set<String> retrieved = retrieve(tracker);
+        assertEquals("Extra elements after add", initAdd, retrieved);
+        assertTrue(read(dataStore.getAllMetadataRecords(BLOBREFERENCES.getType())).isEmpty());
     }
 
     private static Set<String> read(List<DataRecord> recs)

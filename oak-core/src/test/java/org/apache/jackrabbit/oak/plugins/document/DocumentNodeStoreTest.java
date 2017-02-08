@@ -29,6 +29,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -74,6 +75,7 @@ import com.google.common.collect.Sets;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
+import org.apache.jackrabbit.oak.json.JsopDiff;
 import org.apache.jackrabbit.oak.plugins.commit.AnnotatingConflictHandler;
 import org.apache.jackrabbit.oak.plugins.commit.ConflictHook;
 import org.apache.jackrabbit.oak.plugins.commit.ConflictValidatorProvider;
@@ -91,6 +93,7 @@ import org.apache.jackrabbit.oak.spi.commit.Editor;
 import org.apache.jackrabbit.oak.spi.commit.EditorHook;
 import org.apache.jackrabbit.oak.spi.commit.EditorProvider;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
+import org.apache.jackrabbit.oak.spi.commit.Observer;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.DefaultNodeStateDiff;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
@@ -98,6 +101,7 @@ import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.stats.Clock;
 import org.junit.After;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.slf4j.Logger;
@@ -1633,6 +1637,7 @@ public class DocumentNodeStoreTest {
     @Test
     public void concurrentChildOperations() throws Exception {
         Clock clock = new Clock.Virtual();
+        clock.waitUntil(System.currentTimeMillis());
         Revision.setClock(clock);
         MemoryDocumentStore store = new MemoryDocumentStore();
         DocumentNodeStore ns1 = builderProvider.newBuilder()
@@ -1697,6 +1702,7 @@ public class DocumentNodeStoreTest {
     @Test
     public void concurrentChildOperations2() throws Exception {
         Clock clock = new Clock.Virtual();
+        clock.waitUntil(System.currentTimeMillis());
         Revision.setClock(clock);
         MemoryDocumentStore store = new MemoryDocumentStore();
         DocumentNodeStore ns1 = builderProvider.newBuilder()
@@ -1977,20 +1983,16 @@ public class DocumentNodeStoreTest {
         final AtomicBoolean throttleUpdates = new AtomicBoolean(true);
         MemoryDocumentStore docStore = new MemoryDocumentStore() {
             @Override
-            public <T extends Document> void update(Collection<T> collection,
-                                                    List<String> keys,
-                                                    UpdateOp updateOp) {
-                
-                if ( throttleUpdates.get() ) {
-                    for (String k : keys) {
-                        try {
-                            updates.put(k);
-                        } catch (InterruptedException e) {
-                            throw new RuntimeException(e);
-                        }
+            public <T extends Document> T createOrUpdate(Collection<T> collection,
+                                                         UpdateOp update) {
+                if (throttleUpdates.get() && TestUtils.isLastRevUpdate(update)) {
+                    try {
+                        updates.put(update.getId());
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
                     }
                 }
-                super.update(collection, keys, updateOp);
+                return super.createOrUpdate(collection, update);
             }
         };
         final DocumentNodeStore store = builderProvider.newBuilder()
@@ -2566,7 +2568,9 @@ public class DocumentNodeStoreTest {
         builder.child("parent").child("node-x").child("child").child("x");
         b.setRoot(builder.getNodeState());
         // branch state is now InMemory
-        builder.child("b");
+        for (int i = 0; i < DocumentRootBuilder.UPDATE_LIMIT; i++) {
+            builder.child("b" + i);
+        }
         b.setRoot(builder.getNodeState());
         // branch state is now Persisted
         builder.child("c");
@@ -2699,6 +2703,191 @@ public class DocumentNodeStoreTest {
         assertTrue(parent.hasChildNode("foo"));
         assertTrue(parent.hasChildNode("bar"));
         assertTrue(parent.hasChildNode("baz"));
+    }
+
+    @Test
+    public void exceptionHandlingInCommit() throws Exception{
+        DocumentNodeStore ns = builderProvider.newBuilder().getNodeStore();
+        final TestException testException = new TestException();
+        final AtomicBoolean failCommit = new AtomicBoolean();
+        ns.addObserver(new Observer() {
+            @Override
+            public void contentChanged(@Nonnull NodeState root, @Nonnull CommitInfo info) {
+                if (failCommit.get()){
+                    throw testException;
+                }
+            }
+        });
+
+        NodeBuilder b1 = ns.getRoot().builder();
+        b1.child("parent");
+        failCommit.set(true);
+        try {
+            merge(ns, b1);
+            fail();
+        } catch(Exception e){
+            assertSame(testException, Throwables.getRootCause(e));
+        }
+    }
+
+    // OAK-4715
+    @Test
+    public void localChangesFromCache() throws Exception {
+        final AtomicInteger numQueries = new AtomicInteger();
+        DocumentStore store = new MemoryDocumentStore() {
+            @Nonnull
+            @Override
+            public <T extends Document> List<T> query(Collection<T> collection,
+                                                      String fromKey,
+                                                      String toKey,
+                                                      int limit) {
+                if (collection == Collection.NODES) {
+                    numQueries.incrementAndGet();
+                }
+                return super.query(collection, fromKey, toKey, limit);
+            }
+        };
+        DocumentNodeStore ns1 = builderProvider.newBuilder().setClusterId(1)
+                .setAsyncDelay(0).setDocumentStore(store).getNodeStore();
+        NodeBuilder builder = ns1.getRoot().builder();
+        builder.child("node-1");
+        merge(ns1, builder);
+        ns1.runBackgroundOperations();
+        DocumentNodeStore ns2 = builderProvider.newBuilder().setClusterId(2)
+                .setAsyncDelay(0).setDocumentStore(store).getNodeStore();
+        builder = ns2.getRoot().builder();
+        builder.child("node-2");
+        merge(ns2, builder);
+        ns2.runBackgroundOperations();
+        ns1.runBackgroundOperations();
+
+        NodeState before = ns1.getRoot();
+
+        builder = before.builder();
+        builder.child("node-1").child("foo").child("bar");
+        NodeState after = merge(ns1, builder);
+
+        numQueries.set(0);
+        JsopDiff.diffToJsop(before, after);
+        assertEquals(0, numQueries.get());
+
+        before = after;
+        builder = ns1.getRoot().builder();
+        builder.child("node-1").child("foo").child("bar").setProperty("p", 1);
+        after = merge(ns1, builder);
+
+        numQueries.set(0);
+        JsopDiff.diffToJsop(before, after);
+        assertEquals(0, numQueries.get());
+
+        before = after;
+        builder = ns1.getRoot().builder();
+        builder.child("node-1").child("foo").child("bar").remove();
+        after = merge(ns1, builder);
+
+        numQueries.set(0);
+        JsopDiff.diffToJsop(before, after);
+        assertEquals(0, numQueries.get());
+    }
+
+    // OAK-4733
+    @Test
+    public void localChangesFromCache2() throws Exception {
+        final Set<String> finds = Sets.newHashSet();
+        DocumentStore store = new MemoryDocumentStore() {
+            @Override
+            public <T extends Document> T getIfCached(Collection<T> collection,
+                                                      String key) {
+                return super.find(collection, key);
+            }
+
+            @Override
+            public <T extends Document> T find(Collection<T> collection,
+                                               String key) {
+                if (collection == Collection.NODES) {
+                    finds.add(key);
+                }
+                return super.find(collection, key);
+            }
+        };
+        DocumentNodeStore ns1 = builderProvider.newBuilder().setClusterId(1)
+                .setAsyncDelay(0).setDocumentStore(store).getNodeStore();
+        NodeBuilder builder = ns1.getRoot().builder();
+        builder.child("node-1");
+        merge(ns1, builder);
+        ns1.runBackgroundOperations();
+        DocumentNodeStore ns2 = builderProvider.newBuilder().setClusterId(2)
+                .setAsyncDelay(0).setDocumentStore(store).getNodeStore();
+        builder = ns2.getRoot().builder();
+        builder.child("node-2");
+        merge(ns2, builder);
+        ns2.runBackgroundOperations();
+        ns1.runBackgroundOperations();
+
+        builder = ns1.getRoot().builder();
+        builder.child("node-1").child("foo");
+        merge(ns1, builder);
+
+        // adding /node-1/bar must not result in a find on the document store
+        // because the previous merge added 'foo' to a node that did not
+        // have any nodes before
+        finds.clear();
+        builder = ns1.getRoot().builder();
+        builder.child("node-1").child("bar");
+        merge(ns1, builder);
+        assertFalse(finds.contains(Utils.getIdFromPath("/node-1/bar")));
+    }
+
+    // OAK-5149
+    @Test
+    public void getChildNodesWithRootRevision() throws Exception {
+        DocumentNodeStore ns = builderProvider.newBuilder().getNodeStore();
+        NodeBuilder builder = ns.getRoot().builder();
+        builder.child("foo");
+        merge(ns, builder);
+
+        builder = ns.getRoot().builder();
+        builder.child("foo").child("bar");
+        merge(ns, builder);
+
+        builder = ns.getRoot().builder();
+        builder.child("foo").child("baz");
+        merge(ns, builder);
+
+        builder = ns.getRoot().builder();
+        builder.child("qux");
+        merge(ns, builder);
+
+        RevisionVector headRev = ns.getHeadRevision();
+        Iterable<DocumentNodeState> nodes = ns.getChildNodes(
+                asDocumentNodeState(ns.getRoot().getChildNode("foo")), null, 10);
+        assertEquals(2, Iterables.size(nodes));
+        for (DocumentNodeState c : nodes) {
+            assertEquals(headRev, c.getRootRevision());
+        }
+    }
+
+    @Test
+    public void forceJournalFlush() throws Exception {
+        DocumentNodeStore ns = builderProvider.newBuilder().setAsyncDelay(0).getNodeStore();
+        ns.setJournalPushThreshold(2);
+        int numChangedPaths;
+
+        NodeBuilder builder = ns.getRoot().builder();
+        builder.child("foo");
+        merge(ns, builder);
+        numChangedPaths = ns.getCurrentJournalEntry().getNumChangedNodes();
+        assertTrue("Single path change shouldn't flush", numChangedPaths > 0);
+
+        builder = ns.getRoot().builder();
+        builder.child("bar");
+        merge(ns, builder);
+        numChangedPaths = ns.getCurrentJournalEntry().getNumChangedNodes();
+        assertTrue("Two added paths should have forced flush", numChangedPaths == 0);
+    }
+
+    private static class TestException extends RuntimeException {
+
     }
 
     private static DocumentNodeState asDocumentNodeState(NodeState state) {

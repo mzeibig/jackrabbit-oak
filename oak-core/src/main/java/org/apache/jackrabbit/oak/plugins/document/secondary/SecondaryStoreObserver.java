@@ -19,10 +19,10 @@
 
 package org.apache.jackrabbit.oak.plugins.document.secondary;
 
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 
 import com.google.common.base.Stopwatch;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
@@ -42,10 +42,11 @@ import org.apache.jackrabbit.oak.stats.TimerStats;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-class SecondaryStoreObserver implements Observer {
+public class SecondaryStoreObserver implements Observer {
     private final Logger log = LoggerFactory.getLogger(getClass());
     private final NodeStore nodeStore;
     private final PathFilter pathFilter;
+    private final List<String> metaPropNames;
     private final SecondaryStoreRootObserver secondaryObserver;
     private final NodeStateDiffer differ;
     private final TimerStats local;
@@ -53,6 +54,7 @@ class SecondaryStoreObserver implements Observer {
     private boolean firstEventProcessed;
 
     public SecondaryStoreObserver(NodeStore nodeStore,
+                                  List<String> metaPropNames,
                                   NodeStateDiffer differ,
                                   PathFilter pathFilter,
                                   StatisticsProvider statisticsProvider,
@@ -61,12 +63,13 @@ class SecondaryStoreObserver implements Observer {
         this.pathFilter = pathFilter;
         this.secondaryObserver = secondaryObserver;
         this.differ = differ;
+        this.metaPropNames = metaPropNames;
         this.local = statisticsProvider.getTimer("DOCUMENT_CACHE_SEC_LOCAL", StatsOptions.DEFAULT);
         this.external = statisticsProvider.getTimer("DOCUMENT_CACHE_SEC_EXTERNAL", StatsOptions.DEFAULT);
     }
 
     @Override
-    public void contentChanged(@Nonnull NodeState root, @Nullable CommitInfo info) {
+    public void contentChanged(@Nonnull NodeState root, @Nonnull CommitInfo info) {
         //Diff here would also be traversing non visible areas and there
         //diffManyChildren might pose problem for e.g. data under uuid index
         if (!firstEventProcessed){
@@ -78,10 +81,10 @@ class SecondaryStoreObserver implements Observer {
         NodeState secondaryRoot = nodeStore.getRoot();
         NodeState base = DelegatingDocumentNodeState.wrapIfPossible(secondaryRoot, differ);
         NodeBuilder builder = secondaryRoot.builder();
-        ApplyDiff diff = new PathFilteringDiff(builder, pathFilter, target);
+        ApplyDiff diff = new PathFilteringDiff(builder, pathFilter, metaPropNames, target);
 
         //Copy the root node meta properties
-        PathFilteringDiff.copyMetaProperties(target, builder);
+        PathFilteringDiff.copyMetaProperties(target, builder, metaPropNames);
 
         //Apply the rest of properties
         target.compareAgainstBaseState(base, diff);
@@ -89,7 +92,7 @@ class SecondaryStoreObserver implements Observer {
             NodeState updatedSecondaryRoot = nodeStore.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
             secondaryObserver.contentChanged(DelegatingDocumentNodeState.wrap(updatedSecondaryRoot, differ));
 
-            TimerStats timer = info == null ? external : local;
+            TimerStats timer = info.isExternal() ? external : local;
             timer.update(w.elapsed(TimeUnit.NANOSECONDS), TimeUnit.NANOSECONDS);
 
             if (!firstEventProcessed){

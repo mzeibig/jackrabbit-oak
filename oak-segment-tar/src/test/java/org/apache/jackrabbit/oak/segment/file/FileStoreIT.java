@@ -20,13 +20,10 @@ package org.apache.jackrabbit.oak.segment.file;
 
 import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Sets.newTreeSet;
-import static org.apache.jackrabbit.oak.commons.FixturesHelper.Fixture.SEGMENT_MK;
-import static org.apache.jackrabbit.oak.commons.FixturesHelper.getFixtures;
 import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assume.assumeTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
@@ -45,8 +42,6 @@ import org.apache.jackrabbit.oak.segment.Segment;
 import org.apache.jackrabbit.oak.segment.SegmentNodeBuilder;
 import org.apache.jackrabbit.oak.segment.SegmentNodeState;
 import org.apache.jackrabbit.oak.segment.SegmentWriter;
-import org.apache.jackrabbit.oak.segment.file.FileStore.ReadOnlyStore;
-import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -60,22 +55,17 @@ public class FileStoreIT {
         return folder.getRoot();
     }
 
-    @BeforeClass
-    public static void assumptions() {
-        assumeTrue(getFixtures().contains(SEGMENT_MK));
-    }
-
     @Test
-    public void testRestartAndGCWithoutMM() throws IOException {
+    public void testRestartAndGCWithoutMM() throws Exception {
         testRestartAndGC(false);
     }
 
     @Test
-    public void testRestartAndGCWithMM() throws IOException {
+    public void testRestartAndGCWithMM() throws Exception {
         testRestartAndGC(true);
     }
 
-    public void testRestartAndGC(boolean memoryMapping) throws IOException {
+    public void testRestartAndGC(boolean memoryMapping) throws Exception {
         FileStore store = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(memoryMapping).build();
         store.close();
 
@@ -101,7 +91,7 @@ public class FileStoreIT {
     }
 
     @Test
-    public void testRecovery() throws IOException {
+    public void testRecovery() throws Exception {
         FileStore store = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
         store.flush();
 
@@ -171,7 +161,7 @@ public class FileStoreIT {
     }
 
     @Test  // See OAK-2049
-    public void segmentOverflow() throws IOException {
+    public void segmentOverflow() throws Exception {
         for (int n = 1; n < 255; n++) {  // 255 = ListRecord.LEVEL_SIZE
             FileStore store = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
             SegmentWriter writer = store.getWriter();
@@ -204,7 +194,7 @@ public class FileStoreIT {
     }
 
     @Test
-    public void nonBlockingROStore() throws IOException {
+    public void nonBlockingROStore() throws Exception {
         FileStore store = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
         store.flush(); // first 1kB
         SegmentNodeState base = store.getHead();
@@ -213,7 +203,7 @@ public class FileStoreIT {
         store.getRevisions().setHead(base.getRecordId(), builder.getNodeState().getRecordId());
         store.flush(); // second 1kB
 
-        ReadOnlyStore ro = null;
+        ReadOnlyFileStore ro = null;
         try {
             ro = fileStoreBuilder(getFileStoreFolder()).buildReadOnly();
             assertEquals(store.getRevisions().getHead(), ro.getRevisions().getHead());
@@ -226,7 +216,7 @@ public class FileStoreIT {
     }
 
     @Test
-    public void setRevisionTest() throws IOException {
+    public void setRevisionTest() throws Exception {
         try (FileStore store = fileStoreBuilder(getFileStoreFolder()).build()) {
             RecordId id1 = store.getRevisions().getHead();
             SegmentNodeState base = store.getHead();
@@ -236,7 +226,7 @@ public class FileStoreIT {
             RecordId id2 = store.getRevisions().getHead();
             store.flush();
 
-            try (ReadOnlyStore roStore = fileStoreBuilder(getFileStoreFolder()).buildReadOnly()) {
+            try (ReadOnlyFileStore roStore = fileStoreBuilder(getFileStoreFolder()).buildReadOnly()) {
                 assertEquals(id2, roStore.getRevisions().getHead());
 
                 roStore.setRevision(id1.toString());

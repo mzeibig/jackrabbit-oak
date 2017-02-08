@@ -22,6 +22,7 @@ import static org.apache.jackrabbit.oak.plugins.index.IndexUtils.createIndexDefi
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
 
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -349,6 +350,52 @@ public class AsyncIndexUpdateLeaseTest extends OakBaseTest {
                 .setLeaseTimeOut(lease));
     }
 
+
+    @Test
+    public void testLeaseDisabled() throws Exception {
+        // take care of initial reindex before
+        AsyncIndexUpdate async = new AsyncIndexUpdate(name, store, provider).setLeaseTimeOut(0);
+        async.run();
+
+        testContent(store);
+        assertRunOk(async);
+
+        testContent(store);
+        assertRunOk(async);
+
+        executed.set(true);
+    }
+
+    @Test
+    public void testLeaseExpiredToDisabled() throws Exception {
+        // take care of initial reindex before
+        new AsyncIndexUpdate(name, store, provider).run();
+
+        // add extra indexed content
+        testContent(store);
+
+        // make it look like lease got stuck due to force shutdown
+        NodeBuilder builder = store.getRoot().builder();
+        builder.getChildNode(AsyncIndexUpdate.ASYNC).setProperty(
+                AsyncIndexUpdate.leasify(name),
+                System.currentTimeMillis() + 500000);
+        store.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+
+        final IndexStatusListener l1 = new IndexStatusListener() {
+
+            @Override
+            protected void postIndexUpdate() {
+                executed.set(true);
+            }
+        };
+        assertRunOk(new SpecialAsyncIndexUpdate(name, store, provider, l1)
+                .setLeaseTimeOut(0));
+
+        assertFalse("Stale lease info must be cleaned",
+                store.getRoot().getChildNode(AsyncIndexUpdate.ASYNC)
+                        .hasProperty(AsyncIndexUpdate.leasify(name)));
+    }
+
     // -------------------------------------------------------------------
 
     private static String getReferenceCp(NodeStore store, String name) {
@@ -400,10 +447,10 @@ public class AsyncIndexUpdateLeaseTest extends OakBaseTest {
         @Override
         protected AsyncUpdateCallback newAsyncUpdateCallback(NodeStore store,
                                                              String name, long leaseTimeOut, String checkpoint,
-                                                             String afterCheckpoint, AsyncIndexStats indexStats,
+                                                             AsyncIndexStats indexStats,
                                                              AtomicBoolean stopFlag) {
             return new SpecialAsyncUpdateCallback(store, name, leaseTimeOut,
-                    checkpoint, afterCheckpoint, indexStats, stopFlag, listener);
+                    checkpoint, indexStats, stopFlag, listener);
         }
     }
 
@@ -412,16 +459,16 @@ public class AsyncIndexUpdateLeaseTest extends OakBaseTest {
         private IndexStatusListener listener;
 
         public SpecialAsyncUpdateCallback(NodeStore store, String name,
-                                          long leaseTimeOut, String checkpoint, String afterCheckpoint,
+                                          long leaseTimeOut, String checkpoint,
                                           AsyncIndexStats indexStats, AtomicBoolean stopFlag, IndexStatusListener listener) {
-            super(store, name, leaseTimeOut, checkpoint, afterCheckpoint, indexStats, stopFlag);
+            super(store, name, leaseTimeOut, checkpoint, indexStats, stopFlag);
             this.listener = listener;
         }
 
         @Override
-        protected void prepare() throws CommitFailedException {
+        protected void prepare(String afterCheckpoint) throws CommitFailedException {
             listener.prePrepare();
-            super.prepare();
+            super.prepare(afterCheckpoint);
             listener.postPrepare();
         }
 

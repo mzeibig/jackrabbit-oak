@@ -23,8 +23,11 @@ import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toBoolean;
 import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toInteger;
 import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toLong;
 import static org.apache.jackrabbit.oak.osgi.OsgiUtil.lookupFrameworkThenConfiguration;
+import static org.apache.jackrabbit.oak.plugins.document.DocumentMK.Builder.DEFAULT_CACHE_SEGMENT_COUNT;
+import static org.apache.jackrabbit.oak.plugins.document.DocumentMK.Builder.DEFAULT_CACHE_STACK_MOVE_DISTANCE;
 import static org.apache.jackrabbit.oak.plugins.document.DocumentMK.Builder.DEFAULT_CHILDREN_CACHE_PERCENTAGE;
 import static org.apache.jackrabbit.oak.plugins.document.DocumentMK.Builder.DEFAULT_DIFF_CACHE_PERCENTAGE;
+import static org.apache.jackrabbit.oak.plugins.document.DocumentMK.Builder.DEFAULT_MEMORY_CACHE_SIZE;
 import static org.apache.jackrabbit.oak.plugins.document.DocumentMK.Builder.DEFAULT_NODE_CACHE_PERCENTAGE;
 import static org.apache.jackrabbit.oak.plugins.document.DocumentMK.Builder.DEFAULT_PREV_DOC_CACHE_PERCENTAGE;
 import static org.apache.jackrabbit.oak.spi.blob.osgi.SplitBlobStoreService.ONLY_STANDALONE_TARGET;
@@ -44,8 +47,10 @@ import java.util.concurrent.TimeUnit;
 
 import javax.sql.DataSource;
 
+import com.google.common.base.Strings;
 import com.mongodb.MongoClientURI;
 
+import org.apache.commons.io.FilenameUtils;
 import org.apache.felix.scr.annotations.Activate;
 import org.apache.felix.scr.annotations.Component;
 import org.apache.felix.scr.annotations.ConfigurationPolicy;
@@ -80,6 +85,7 @@ import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.blob.BlobStoreWrapper;
 import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
 import org.apache.jackrabbit.oak.spi.blob.stats.BlobStoreStatsMBean;
+import org.apache.jackrabbit.oak.spi.commit.BackgroundObserverMBean;
 import org.apache.jackrabbit.oak.spi.state.Clusterable;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.spi.state.RevisionGC;
@@ -111,14 +117,14 @@ import org.slf4j.LoggerFactory;
                 "options are supported"
 )
 public class DocumentNodeStoreService {
+
+    private static final long MB = 1024 * 1024;
     private static final String DEFAULT_URI = "mongodb://localhost:27017/oak";
-    private static final int DEFAULT_CACHE = 256;
+    private static final int DEFAULT_CACHE = (int) (DEFAULT_MEMORY_CACHE_SIZE / MB);
     private static final int DEFAULT_BLOB_CACHE_SIZE = 16;
     private static final String DEFAULT_DB = "oak";
-    private static final String DEFAULT_PERSISTENT_CACHE = "";
-    private static final String DEFAULT_JOURNAL_CACHE = "";
-    private static final int DEFAULT_CACHE_SEGMENT_COUNT = 16;
-    private static final int DEFAULT_CACHE_STACK_MOVE_DISTANCE = 16;
+    private static final String DEFAULT_PERSISTENT_CACHE = "cache,binary=0";
+    private static final String DEFAULT_JOURNAL_CACHE = "diff-cache";
     private static final String PREFIX = "oak.documentstore.";
     private static final String DESCRIPTION = "oak.nodestore.description";
 
@@ -178,7 +184,7 @@ public class DocumentNodeStoreService {
     )
     private static final String PROP_DIFF_CACHE_PERCENTAGE = "diffCachePercentage";
     
-    @Property(intValue = DocumentMK.Builder.DEFAULT_CACHE_SEGMENT_COUNT,
+    @Property(intValue = DEFAULT_CACHE_SEGMENT_COUNT,
             label = "LIRS Cache Segment Count",
             description = "The number of segments in the LIRS cache " + 
                     "(default 16, a higher count means higher concurrency " + 
@@ -186,7 +192,7 @@ public class DocumentNodeStoreService {
     )
     private static final String PROP_CACHE_SEGMENT_COUNT = "cacheSegmentCount";
 
-    @Property(intValue = DocumentMK.Builder.DEFAULT_CACHE_STACK_MOVE_DISTANCE,
+    @Property(intValue = DEFAULT_CACHE_STACK_MOVE_DISTANCE,
             label = "LIRS Cache Stack Move Distance",
             description = "The delay to move entries to the head of the queue " + 
                     "in the LIRS cache " +
@@ -204,14 +210,14 @@ public class DocumentNodeStoreService {
 
     @Property(value = DEFAULT_PERSISTENT_CACHE,
             label = "Persistent Cache Config",
-            description = "Configuration for enabling Persistent cache. By default it is not enabled. Refer to " +
+            description = "Configuration for persistent cache. Refer to " +
                     "http://jackrabbit.apache.org/oak/docs/nodestore/persistent-cache.html for various options"
     )
     private static final String PROP_PERSISTENT_CACHE = "persistentCache";
 
     @Property(value = DEFAULT_JOURNAL_CACHE,
             label = "Journal Cache Config",
-            description = "Configuration for enabling journal cache. By default it is not enabled. Refer to " +
+            description = "Configuration for journal cache. Refer to " +
                     "http://jackrabbit.apache.org/oak/docs/nodestore/persistent-cache.html for various options"
     )
     private static final String PROP_JOURNAL_CACHE = "journalCache";
@@ -240,20 +246,12 @@ public class DocumentNodeStoreService {
     )
     private static final String PROP_JOURNAL_GC_MAX_AGE_MILLIS = "journalGCMaxAge";
 
-    /**
-     * Batch size used during to lookup and delete journal entries during journalGC
-     */
-    private static final int DEFAULT_JOURNAL_GC_BATCH_SIZE = 100;
-    @Property (intValue = DEFAULT_JOURNAL_GC_BATCH_SIZE,
-            label = "Batch size used for journalGC",
-            description = "The journal gc queries the journal for entries older than configured to delete them. " +
-                    "It does so in batches to speed up the process. The batch size can be configured via this " +
-                    " property. The trade-off is between reducing number of operations with a larger batch size, " +
-                    " and consuming more memory less memory with a smaller batch size."
+    @Property (boolValue = false,
+            label = "Pre-fetch external changes",
+            description = "Boolean value indicating if external changes should " +
+                    "be pre-fetched in a background thread."
     )
-    public static final String PROP_JOURNAL_GC_BATCH_SIZE = "journalGcBatchSize";
-
-    private static final long MB = 1024 * 1024;
+    public static final String PROP_PREFETCH_EXTERNAL_CHANGES = "prefetchExternalChanges";
 
     private static enum DocumentStoreType {
         MONGO, RDB;
@@ -294,6 +292,7 @@ public class DocumentNodeStoreService {
 
     private DocumentNodeStore nodeStore;
     private ObserverTracker observerTracker;
+    private JournalPropertyHandlerFactory journalPropertyHandlerFactory = new JournalPropertyHandlerFactory();
     private ComponentContext context;
     private Whiteboard whiteboard;
     private long deactivationTimestamp = 0;
@@ -334,14 +333,20 @@ public class DocumentNodeStoreService {
     @Property (longValue = DEFAULT_BLOB_SNAPSHOT_INTERVAL,
         label = "Blob tracking snapshot interval (in secs)",
         description = "This is the default interval in which the snapshots of locally tracked blob ids will"
-            + "be taken and synchronized with the blob store"
+            + "be taken and synchronized with the blob store. This should be configured to be less than the "
+            + "frequency of blob GC so that deletions during blob GC can be accounted for "
+            + "in the next GC execution."
     )
     public static final String PROP_BLOB_SNAPSHOT_INTERVAL = "blobTrackSnapshotIntervalInSecs";
 
     private static final String DEFAULT_PROP_HOME = "./repository";
-    @Property(value = DEFAULT_PROP_HOME,
+    @Property(
         label = "Root directory",
-        description = "Root directory for local tracking of blob ids"
+        description = "Root directory for local tracking of blob ids. This service " +
+                "will first lookup the 'repository.home' framework property and " +
+                "then a component context property with the same name. If none " +
+                "of them is defined, a sub directory 'repository' relative to " +
+                "the current working directory is used."
     )
     private static final String PROP_HOME = "repository.home";
 
@@ -363,6 +368,14 @@ public class DocumentNodeStoreService {
             description = "Type of DocumentStore to use for persistence. Defaults to MONGO"
     )
     public static final String PROP_DS_TYPE = "documentStoreType";
+
+    private static final boolean DEFAULT_BUNDLING_DISABLED = false;
+    @Property(boolValue = DEFAULT_BUNDLING_DISABLED,
+            label = "Bundling Disabled",
+            description = "Boolean value indicating that Node bundling is disabled"
+    )
+    private static final String PROP_BUNDLING_DISABLED = "bundlingDisabled";
+
     private DocumentStoreType documentStoreType;
 
     @Reference
@@ -414,10 +427,12 @@ public class DocumentNodeStoreService {
         int childrenCachePercentage = toInteger(prop(PROP_CHILDREN_CACHE_PERCENTAGE), DEFAULT_CHILDREN_CACHE_PERCENTAGE);
         int diffCachePercentage = toInteger(prop(PROP_DIFF_CACHE_PERCENTAGE), DEFAULT_DIFF_CACHE_PERCENTAGE);
         int blobCacheSize = toInteger(prop(PROP_BLOB_CACHE_SIZE), DEFAULT_BLOB_CACHE_SIZE);
-        String persistentCache = PropertiesUtil.toString(prop(PROP_PERSISTENT_CACHE), DEFAULT_PERSISTENT_CACHE);
-        String journalCache = PropertiesUtil.toString(prop(PROP_JOURNAL_CACHE), DEFAULT_JOURNAL_CACHE);
+        String persistentCache = getPath(PROP_PERSISTENT_CACHE, DEFAULT_PERSISTENT_CACHE);
+        String journalCache = getPath(PROP_JOURNAL_CACHE, DEFAULT_JOURNAL_CACHE);
         int cacheSegmentCount = toInteger(prop(PROP_CACHE_SEGMENT_COUNT), DEFAULT_CACHE_SEGMENT_COUNT);
         int cacheStackMoveDistance = toInteger(prop(PROP_CACHE_STACK_MOVE_DISTANCE), DEFAULT_CACHE_STACK_MOVE_DISTANCE);
+        boolean bundlingDisabled = toBoolean(prop(PROP_BUNDLING_DISABLED), DEFAULT_BUNDLING_DISABLED);
+        boolean prefetchExternalChanges = toBoolean(prop(PROP_PREFETCH_EXTERNAL_CHANGES), false);
         DocumentMK.Builder mkBuilder =
                 new DocumentMK.Builder().
                 setStatisticsProvider(statisticsProvider).
@@ -429,7 +444,9 @@ public class DocumentNodeStoreService {
                         diffCachePercentage).
                 setCacheSegmentCount(cacheSegmentCount).
                 setCacheStackMoveDistance(cacheStackMoveDistance).
-                setLeaseCheck(true /* OAK-2739: enabled by default */).
+                setBundlingDisabled(bundlingDisabled).
+                        setJournalPropertyHandlerFactory(journalPropertyHandlerFactory).
+                setLeaseCheck(!ClusterNodeInfo.DEFAULT_LEASE_CHECK_DISABLED /* OAK-2739: enabled by default */).
                 setLeaseFailureHandler(new LeaseFailureHandler() {
                     
                     @Override
@@ -438,7 +455,7 @@ public class DocumentNodeStoreService {
                             // plan A: try stopping oak-core
                             log.error("handleLeaseFailure: stopping oak-core...");
                             Bundle bundle = context.getBundleContext().getBundle();
-                            bundle.stop();
+                            bundle.stop(Bundle.STOP_TRANSIENT);
                             log.error("handleLeaseFailure: stopped oak-core.");
                             // plan A worked, perfect!
                         } catch (BundleException e) {
@@ -450,12 +467,13 @@ public class DocumentNodeStoreService {
                             // plan B succeeded.
                         }
                     }
-                });
+                }).
+                setPrefetchExternalChanges(prefetchExternalChanges);
 
-        if (persistentCache != null && persistentCache.length() > 0) {
+        if (!Strings.isNullOrEmpty(persistentCache)) {
             mkBuilder.setPersistentCache(persistentCache);
         }
-        if (journalCache != null && journalCache.length() > 0) {
+        if (!Strings.isNullOrEmpty(journalCache)) {
             mkBuilder.setJournalCache(journalCache);
         }
 
@@ -538,7 +556,7 @@ public class DocumentNodeStoreService {
             if (blobStore instanceof BlobTrackingStore) {
                 final long trackSnapshotInterval = toLong(prop(PROP_BLOB_SNAPSHOT_INTERVAL),
                     DEFAULT_BLOB_SNAPSHOT_INTERVAL);
-                String root = PropertiesUtil.toString(prop(PROP_HOME), DEFAULT_PROP_HOME);
+                String root = getRepositoryHome();
 
                 BlobTrackingStore trackingStore = (BlobTrackingStore) blobStore;
                 if (trackingStore.getTracker() != null) {
@@ -557,6 +575,7 @@ public class DocumentNodeStoreService {
 
         observerTracker = new ObserverTracker(nodeStore);
         observerTracker.start(context.getBundleContext());
+        journalPropertyHandlerFactory.start(whiteboard);
 
         DocumentStore ds = nodeStore.getDocumentStore();
 
@@ -598,6 +617,10 @@ public class DocumentNodeStoreService {
             observerTracker.stop();
         }
 
+        if (journalPropertyHandlerFactory != null){
+            journalPropertyHandlerFactory.stop();
+        }
+
         unregisterNodeStore();
     }
 
@@ -622,28 +645,47 @@ public class DocumentNodeStoreService {
 
     @SuppressWarnings("UnusedDeclaration")
     protected void bindDataSource(DataSource dataSource) throws IOException {
-        log.info("Initializing DocumentNodeStore with dataSource [{}]", dataSource);
-        this.dataSource = dataSource;
-        registerNodeStoreIfPossible();
+        if (this.dataSource != null) {
+            log.info("Ignoring bindDataSource [{}] because dataSource [{}] is already bound", dataSource, this.dataSource);
+        } else {
+            log.info("Initializing DocumentNodeStore with dataSource [{}]", dataSource);
+            this.dataSource = dataSource;
+            registerNodeStoreIfPossible();
+        }
     }
 
     @SuppressWarnings("UnusedDeclaration")
     protected void unbindDataSource(DataSource dataSource) {
-        this.dataSource = null;
-        unregisterNodeStore();
+        if (this.dataSource != dataSource) {
+            log.info("Ignoring unbindDataSource [{}] because dataSource is bound to [{}]", dataSource, this.dataSource);
+        } else {
+            log.info("Unregistering DocumentNodeStore because dataSource [{}] was unbound", dataSource);
+            this.dataSource = null;
+            unregisterNodeStore();
+        }
     }
 
     @SuppressWarnings("UnusedDeclaration")
     protected void bindBlobDataSource(DataSource dataSource) throws IOException {
-        log.info("Initializing DocumentNodeStore with blobDataSource [{}]", dataSource);
-        this.blobDataSource = dataSource;
-        registerNodeStoreIfPossible();
+        if (this.blobDataSource != null) {
+            log.info("Ignoring bindBlobDataSource [{}] because blobDataSource [{}] is already bound", dataSource,
+                    this.blobDataSource);
+        } else {
+            log.info("Initializing DocumentNodeStore with blobDataSource [{}]", dataSource);
+            this.blobDataSource = dataSource;
+            registerNodeStoreIfPossible();
+        }
     }
 
     @SuppressWarnings("UnusedDeclaration")
     protected void unbindBlobDataSource(DataSource dataSource) {
-        this.blobDataSource = null;
-        unregisterNodeStore();
+        if (this.blobDataSource != dataSource) {
+            log.info("Ignoring unbindBlobDataSource [{}] because dataSource is bound to [{}]", dataSource, this.blobDataSource);
+        } else {
+            log.info("Unregistering DocumentNodeStore because blobDataSource [{}] was unbound", dataSource);
+            this.blobDataSource = null;
+            unregisterNodeStore();
+        }
     }
 
     @SuppressWarnings("UnusedDeclaration")
@@ -787,7 +829,7 @@ public class DocumentNodeStoreService {
                     BlobGCMBean.TYPE, "Document node store blob garbage collection"));
         }
 
-        RevisionGC revisionGC = new RevisionGC(new Runnable() {
+        Runnable startGC = new Runnable() {
             @Override
             public void run() {
                 try {
@@ -796,7 +838,14 @@ public class DocumentNodeStoreService {
                     log.warn("Error occurred while executing the Version Garbage Collector", e);
                 }
             }
-        }, executor);
+        };
+        Runnable cancelGC = new Runnable() {
+            @Override
+            public void run() {
+                store.getVersionGarbageCollector().cancel();
+            }
+        };
+        RevisionGC revisionGC = new RevisionGC(startGC, cancelGC, executor);
         registrations.add(registerMBean(whiteboard, RevisionGCMBean.class, revisionGC,
                 RevisionGCMBean.TYPE, "Document node store revision garbage collection"));
 
@@ -807,6 +856,14 @@ public class DocumentNodeStoreService {
                     blobStoreStats,
                     BlobStoreStatsMBean.TYPE,
                     ds.getClass().getSimpleName()));
+        }
+
+        if (!mkBuilder.isBundlingDisabled()){
+            registrations.add(registerMBean(whiteboard,
+                    BackgroundObserverMBean.class,
+                    store.getBundlingConfigHandler().getMBean(),
+                    BackgroundObserverMBean.TYPE,
+                    "BundlingConfigObserver"));
         }
     }
 
@@ -829,14 +886,12 @@ public class DocumentNodeStoreService {
                 DEFAULT_JOURNAL_GC_INTERVAL_MILLIS);
         final long journalGCMaxAge = toLong(context.getProperties().get(PROP_JOURNAL_GC_MAX_AGE_MILLIS),
                 DEFAULT_JOURNAL_GC_MAX_AGE_MILLIS);
-        final int journalGCBatchSize = toInteger(context.getProperties().get(PROP_JOURNAL_GC_BATCH_SIZE),
-                DEFAULT_JOURNAL_GC_BATCH_SIZE);
-        
+
         Runnable journalGCJob = new Runnable() {
 
             @Override
             public void run() {
-                nodeStore.getJournalGarbageCollector().gc(journalGCMaxAge, journalGCBatchSize, TimeUnit.MILLISECONDS);
+                nodeStore.getJournalGarbageCollector().gc(journalGCMaxAge, TimeUnit.MILLISECONDS);
             }
 
         };
@@ -845,12 +900,33 @@ public class DocumentNodeStoreService {
                 true/*runOnSingleClusterNode*/, true /*use dedicated pool*/));
     }
 
-    private Object prop(String propName) {
+    private String prop(String propName) {
         return prop(propName, PREFIX + propName);
     }
 
-    private Object prop(String propName, String fwkPropName) {
+    private String prop(String propName, String fwkPropName) {
         return lookupFrameworkThenConfiguration(context, propName, fwkPropName);
+    }
+
+    private String getPath(String propName, String defaultValue) {
+        String path = PropertiesUtil.toString(prop(propName), defaultValue);
+        if (Strings.isNullOrEmpty(path)) {
+            return path;
+        }
+        if ("-".equals(path)) {
+            // disable this path configuration
+            return "";
+        }
+        // resolve as relative to repository.home
+        return FilenameUtils.concat(getRepositoryHome(), path);
+    }
+
+    private String getRepositoryHome() {
+        String repoHome = prop(PROP_HOME, PROP_HOME);
+        if (Strings.isNullOrEmpty(repoHome)) {
+            repoHome = DEFAULT_PROP_HOME;
+        }
+        return repoHome;
     }
 
     private static String[] getMetadata(DocumentStore ds) {

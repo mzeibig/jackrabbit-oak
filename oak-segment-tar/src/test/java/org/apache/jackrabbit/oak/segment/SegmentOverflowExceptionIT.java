@@ -30,7 +30,6 @@ import java.util.Random;
 
 import com.google.common.collect.Iterables;
 import org.apache.jackrabbit.oak.api.Blob;
-import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
@@ -93,7 +92,7 @@ public class SegmentOverflowExceptionIT {
     };
 
     @Test
-    public void run() throws IOException, CommitFailedException, InterruptedException {
+    public void run() throws Exception {
         FileStore fileStore = fileStoreBuilder(getFileStoreFolder()).withGCMonitor(gcMonitor).build();
         try {
             final SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
@@ -109,7 +108,7 @@ public class SegmentOverflowExceptionIT {
 
                     if (compact) {
                         compact = false;
-                        fileStore.maybeCompact(true);
+                        fileStore.gc();
                     }
                 } catch (SegmentNotFoundException snfe) {
                     // Usually this can be ignored as SNFEs are somewhat expected here

@@ -21,6 +21,8 @@ package org.apache.jackrabbit.oak.plugins.index.lucene;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Dictionary;
+import java.util.Hashtable;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -48,17 +50,27 @@ import org.apache.jackrabbit.oak.api.jmx.CacheStatsMBean;
 import org.apache.jackrabbit.oak.cache.CacheStats;
 import org.apache.jackrabbit.oak.commons.PropertiesUtil;
 import org.apache.jackrabbit.oak.osgi.OsgiWhiteboard;
+import org.apache.jackrabbit.oak.plugins.document.spi.JournalPropertyService;
 import org.apache.jackrabbit.oak.plugins.index.IndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.aggregate.NodeAggregator;
 import org.apache.jackrabbit.oak.plugins.index.fulltext.PreExtractedTextProvider;
+import org.apache.jackrabbit.oak.plugins.index.lucene.hybrid.DocumentQueue;
+import org.apache.jackrabbit.oak.plugins.index.lucene.hybrid.ExternalObserverBuilder;
+import org.apache.jackrabbit.oak.plugins.index.lucene.hybrid.LocalIndexObserver;
+import org.apache.jackrabbit.oak.plugins.index.lucene.hybrid.LuceneJournalPropertyService;
+import org.apache.jackrabbit.oak.plugins.index.lucene.hybrid.NRTIndexFactory;
+import org.apache.jackrabbit.oak.plugins.index.lucene.reader.DefaultIndexReaderFactory;
+import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
 import org.apache.jackrabbit.oak.spi.commit.BackgroundObserver;
 import org.apache.jackrabbit.oak.plugins.index.lucene.score.ScorerProviderFactory;
 import org.apache.jackrabbit.oak.spi.commit.BackgroundObserverMBean;
 import org.apache.jackrabbit.oak.spi.commit.Observer;
 import org.apache.jackrabbit.oak.spi.gc.GCMonitor;
+import org.apache.jackrabbit.oak.spi.mount.MountInfoProvider;
 import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
 import org.apache.jackrabbit.oak.spi.whiteboard.Registration;
 import org.apache.jackrabbit.oak.spi.whiteboard.Whiteboard;
+import org.apache.jackrabbit.oak.stats.StatisticsProvider;
 import org.apache.lucene.analysis.util.CharFilterFactory;
 import org.apache.lucene.analysis.util.TokenFilterFactory;
 import org.apache.lucene.analysis.util.TokenizerFactory;
@@ -189,9 +201,38 @@ public class LuceneIndexProviderService {
     )
     private static final String PROP_BOOLEAN_CLAUSE_LIMIT = "booleanClauseLimit";
 
+    private static final boolean PROP_HYBRID_INDEXING_DEFAULT = true;
+    @Property(
+            boolValue = PROP_HYBRID_INDEXING_DEFAULT,
+            label = "Hybrid Indexing",
+            description = "When enabled Lucene NRT Indexing mode would be enabled"
+    )
+    private static final String PROP_HYBRID_INDEXING = "enableHybridIndexing";
+
+    private static final int PROP_HYBRID_QUEUE_SIZE_DEFAULT = 10000;
+    @Property(
+            intValue = PROP_HYBRID_QUEUE_SIZE_DEFAULT,
+            label = "Queue size",
+            description = "Size of in memory queue used for storing Lucene Documents which need to be " +
+                    "added to local index"
+    )
+    private static final String PROP_HYBRID_QUEUE_SIZE = "hybridQueueSize";
+
+    private static final boolean PROP_DISABLE_DEFN_STORAGE_DEFAULT = false;
+    @Property(
+            boolValue = PROP_DISABLE_DEFN_STORAGE_DEFAULT,
+            label = "Disable index definition storage",
+            description = "By default index definitions would be stored at time of reindexing to ensure that future " +
+                    "modifications to it are not effective untill index is reindex. Set this to true would disable " +
+                    "this feature"
+    )
+    private static final String PROP_DISABLE_STORED_INDEX_DEFINITION = "disableStoredIndexDefinition";
+
     private Whiteboard whiteboard;
 
     private BackgroundObserver backgroundObserver;
+
+    private BackgroundObserver externalIndexObserver;
 
     @Reference
     ScorerProviderFactory scorerFactory;
@@ -199,11 +240,23 @@ public class LuceneIndexProviderService {
     @Reference
     private IndexAugmentorFactory augmentorFactory;
 
+    @Reference
+    private StatisticsProvider statisticsProvider;
+
     @Reference(policy = ReferencePolicy.DYNAMIC,
             cardinality = ReferenceCardinality.OPTIONAL_UNARY,
             policyOption = ReferencePolicyOption.GREEDY
     )
     private volatile PreExtractedTextProvider extractedTextProvider;
+
+    @Reference
+    private MountInfoProvider mountInfoProvider;
+
+    @Reference(cardinality = ReferenceCardinality.OPTIONAL_UNARY,
+        policyOption = ReferencePolicyOption.GREEDY,
+        policy = ReferencePolicy.DYNAMIC
+    )
+    private GarbageCollectableBlobStore blobStore;
 
     private IndexCopier indexCopier;
 
@@ -215,29 +268,41 @@ public class LuceneIndexProviderService {
 
     private ExtractedTextCache extractedTextCache;
 
+    private boolean hybridIndex;
+
+    private NRTIndexFactory nrtIndexFactory;
+
+    private DocumentQueue documentQueue;
+
+    private LuceneIndexEditorProvider editorProvider;
+
     @Activate
     private void activate(BundleContext bundleContext, Map<String, ?> config)
             throws NotCompliantMBeanException, IOException {
         boolean disabled = PropertiesUtil.toBoolean(config.get(PROP_DISABLED), PROP_DISABLED_DEFAULT);
+        hybridIndex = PropertiesUtil.toBoolean(config.get(PROP_HYBRID_INDEXING), PROP_DISABLED_DEFAULT);
 
         if (disabled) {
             log.info("Component disabled by configuration");
             return;
         }
 
+        configureIndexDefinitionStorage(config);
         configureBooleanClauseLimit(config);
         initializeFactoryClassLoaders(getClass().getClassLoader());
 
         whiteboard = new OsgiWhiteboard(bundleContext);
         threadPoolSize = PropertiesUtil.toInteger(config.get(PROP_THREAD_POOL_SIZE), PROP_THREAD_POOL_SIZE_DEFAULT);
         initializeExtractedTextCache(bundleContext, config);
-        indexProvider = new LuceneIndexProvider(createTracker(bundleContext, config), scorerFactory, augmentorFactory);
+        IndexTracker tracker = createTracker(bundleContext, config);
+        indexProvider = new LuceneIndexProvider(tracker, scorerFactory, augmentorFactory);
         initializeLogging(config);
         initialize();
 
         regs.add(bundleContext.registerService(QueryIndexProvider.class.getName(), indexProvider, null));
         registerObserver(bundleContext, config);
-        registerIndexEditor(bundleContext, config);
+        registerLocalIndexObserver(bundleContext, tracker, config);
+        registerIndexEditor(bundleContext, tracker, config);
 
         oakRegs.add(registerMBean(whiteboard,
                 LuceneIndexMBean.class,
@@ -261,9 +326,21 @@ public class LuceneIndexProviderService {
             backgroundObserver.close();
         }
 
+        if (externalIndexObserver != null){
+            externalIndexObserver.close();
+        }
+
         if (indexProvider != null) {
             indexProvider.close();
             indexProvider = null;
+        }
+
+        if (documentQueue != null){
+            documentQueue.close();
+        }
+
+        if (nrtIndexFactory != null){
+            nrtIndexFactory.close();
         }
 
         //Close the copier first i.e. before executorService
@@ -308,17 +385,26 @@ public class LuceneIndexProviderService {
         }
     }
 
-    private void registerIndexEditor(BundleContext bundleContext, Map<String, ?> config) throws IOException {
+    private void registerIndexEditor(BundleContext bundleContext, IndexTracker tracker, Map<String, ?> config) throws IOException {
         boolean enableCopyOnWrite = PropertiesUtil.toBoolean(config.get(PROP_COPY_ON_WRITE), PROP_COPY_ON_WRITE_DEFAULT);
-        LuceneIndexEditorProvider editorProvider;
         if (enableCopyOnWrite){
             initializeIndexCopier(bundleContext, config);
-            editorProvider = new LuceneIndexEditorProvider(indexCopier, extractedTextCache, augmentorFactory);
+            editorProvider = new LuceneIndexEditorProvider(indexCopier, tracker, extractedTextCache,
+                    augmentorFactory,  mountInfoProvider);
             log.info("Enabling CopyOnWrite support. Index files would be copied under {}", indexDir.getAbsolutePath());
         } else {
-            editorProvider = new LuceneIndexEditorProvider(null, extractedTextCache, augmentorFactory);
+            editorProvider = new LuceneIndexEditorProvider(null, tracker, extractedTextCache, augmentorFactory,
+                    mountInfoProvider);
         }
-        regs.add(bundleContext.registerService(IndexEditorProvider.class.getName(), editorProvider, null));
+        editorProvider.setBlobStore(blobStore);
+
+        if (hybridIndex){
+            editorProvider.setIndexingQueue(checkNotNull(documentQueue));
+        }
+
+        Dictionary<String, Object> props = new Hashtable<String, Object>();
+        props.put("type", "lucene");
+        regs.add(bundleContext.registerService(IndexEditorProvider.class.getName(), editorProvider, props));
         oakRegs.add(registerMBean(whiteboard,
                 TextExtractionStatsMBean.class,
                 editorProvider.getExtractedTextCache().getStatsMBean(),
@@ -331,7 +417,10 @@ public class LuceneIndexProviderService {
         if (enableCopyOnRead){
             initializeIndexCopier(bundleContext, config);
             log.info("Enabling CopyOnRead support. Index files would be copied under {}", indexDir.getAbsolutePath());
-            return new IndexTracker(indexCopier);
+            if (hybridIndex) {
+                nrtIndexFactory = new NRTIndexFactory(indexCopier, statisticsProvider);
+            }
+            return new IndexTracker(new DefaultIndexReaderFactory(mountInfoProvider, indexCopier), nrtIndexFactory);
         }
 
         return new IndexTracker();
@@ -420,6 +509,37 @@ public class LuceneIndexProviderService {
         regs.add(bundleContext.registerService(Observer.class.getName(), observer, null));
     }
 
+    private void registerLocalIndexObserver(BundleContext bundleContext, IndexTracker tracker, Map<String, ?> config) {
+        if (!hybridIndex){
+            log.info("Hybrid indexing feature disabled");
+            return;
+        }
+
+        int queueSize = PropertiesUtil.toInteger(config.get(PROP_HYBRID_QUEUE_SIZE), PROP_HYBRID_QUEUE_SIZE_DEFAULT);
+        documentQueue = new DocumentQueue(queueSize, tracker, getExecutorService(), statisticsProvider);
+        LocalIndexObserver localIndexObserver = new LocalIndexObserver(documentQueue, statisticsProvider);
+        regs.add(bundleContext.registerService(Observer.class.getName(), localIndexObserver, null));
+
+        int observerQueueSize = 1000;
+        int builderMaxSize = 5000;
+        regs.add(bundleContext.registerService(JournalPropertyService.class.getName(),
+                new LuceneJournalPropertyService(builderMaxSize), null));
+        ExternalObserverBuilder builder = new ExternalObserverBuilder(documentQueue, tracker, statisticsProvider,
+                getExecutorService(), observerQueueSize);
+        log.info("Configured JournalPropertyBuilder with max size {} and backed by BackgroundObserver " +
+                "with queue size {}", builderMaxSize, observerQueueSize);
+
+        Observer observer = builder.build();
+        externalIndexObserver = builder.getBackgroundObserver();
+        regs.add(bundleContext.registerService(Observer.class.getName(), observer, null));
+        oakRegs.add(registerMBean(whiteboard,
+                BackgroundObserverMBean.class,
+                externalIndexObserver.getMBean(),
+                BackgroundObserverMBean.TYPE,
+                "LuceneExternalIndexObserver queue stats"));
+        log.info("Hybrid indexing enabled for configured indexes with queue size of {}", queueSize);
+    }
+
     private void initializeFactoryClassLoaders(ClassLoader classLoader) {
         ClassLoader originalClassLoader = Thread.currentThread()
                 .getContextClassLoader();
@@ -501,16 +621,36 @@ public class LuceneIndexProviderService {
         }
     }
 
+    private void configureIndexDefinitionStorage(Map<String, ?> config) {
+        boolean disableStorage = PropertiesUtil.toBoolean(config.get(PROP_DISABLE_STORED_INDEX_DEFINITION),
+                PROP_DISABLE_DEFN_STORAGE_DEFAULT);
+        if (disableStorage){
+            log.info("Feature to ensure that index definition matches the index state is disabled. Change in " +
+                    "index definition would now affect query plans and might lead to inconsistent results.");
+            IndexDefinition.setDisableStoredIndexDefinition(disableStorage);
+        }
+    }
+
     private void registerGCMonitor(Whiteboard whiteboard,
             final IndexTracker tracker) {
         GCMonitor gcMonitor = new GCMonitor.Empty() {
             @Override
-            public void compacted(long[] segmentCounts, long[] recordCounts,
-                    long[] compactionMapWeights) {
+            public void compacted() {
                 tracker.refresh();
             }
         };
         oakRegs.add(whiteboard.register(GCMonitor.class, gcMonitor, emptyMap()));
+    }
+
+    private void registerBlobStore(GarbageCollectableBlobStore blobStore) {
+        if (editorProvider != null){
+            if (blobStore != null){
+                log.info("Registering blobStore {} with editorProvider. ", blobStore);
+            } else {
+                log.info("Unregistering blobStore");
+            }
+            editorProvider.setBlobStore(blobStore);
+        }
     }
 
     protected void bindNodeAggregator(NodeAggregator aggregator) {
@@ -531,5 +671,15 @@ public class LuceneIndexProviderService {
     protected void unbindExtractedTextProvider(PreExtractedTextProvider preExtractedTextProvider){
         this.extractedTextProvider = null;
         registerExtractedTextProvider(null);
+    }
+
+    protected void bindBlobStore(GarbageCollectableBlobStore blobStore) {
+        this.blobStore = blobStore;
+        registerBlobStore(blobStore);
+    }
+
+    protected void unbindBlobStore(GarbageCollectableBlobStore blobStore) {
+        this.blobStore = null;
+        registerBlobStore(blobStore);
     }
 }

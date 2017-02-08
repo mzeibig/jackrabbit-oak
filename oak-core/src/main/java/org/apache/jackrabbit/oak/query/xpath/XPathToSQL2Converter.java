@@ -17,6 +17,8 @@
 package org.apache.jackrabbit.oak.query.xpath;
 
 import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.query.QueryOptions;
+import org.apache.jackrabbit.oak.query.QueryOptions.Traversal;
 import org.apache.jackrabbit.oak.query.xpath.Statement.UnionStatement;
 import org.apache.jackrabbit.util.ISO9075;
 import org.slf4j.Logger;
@@ -25,6 +27,7 @@ import org.slf4j.LoggerFactory;
 import java.math.BigDecimal;
 import java.text.ParseException;
 import java.util.ArrayList;
+import java.util.Locale;
 
 /**
  * This class can can convert a XPATH query to a SQL2 query.
@@ -295,9 +298,11 @@ public class XPathToSQL2Converter {
                 throw getSyntaxError();
             }
             if (readIf("[")) {
-                Expression c = parseConstraint();
-                currentSelector.condition = Expression.and(currentSelector.condition, c);
-                read("]");
+                do {
+                    Expression c = parseConstraint();
+                    currentSelector.condition = Expression.and(currentSelector.condition, c);
+                    read("]");
+                } while (readIf("["));
             }
             startOfQuery = false;
             nextSelector(false);
@@ -324,11 +329,21 @@ public class XPathToSQL2Converter {
                 statement.addOrderBy(order);
             } while (readIf(","));
         }
+        QueryOptions options = new QueryOptions();
+        if (readIf("option")) {
+            read("(");
+            if (readIf("traversal")) {
+                String type = readIdentifier().toUpperCase(Locale.ENGLISH);
+                options.traversal = Traversal.valueOf(type);
+            }
+            read(")");
+        }
         if (!currentToken.isEmpty()) {
             throw getSyntaxError("<end>");
         }
         statement.setColumnSelector(currentSelector);
         statement.setSelectors(selectors);
+        statement.setQueryOptions(options);
         
         Expression where = null;
         for (Selector s : selectors) {
@@ -651,10 +666,24 @@ public class XPathToSQL2Converter {
             f.params.add(parseExpression());
             read(")");
             return f;
+        } else if ("fn:string-length".equals(functionName)) {
+            Expression.Function f = new Expression.Function("length");
+            f.params.add(parseExpression());
+            read(")");
+            return f;
         } else if ("fn:name".equals(functionName)) {
             Expression.Function f = new Expression.Function("name");
             if (!readIf(")")) {
                 // only name(.) and name() are currently supported
+                read(".");
+                read(")");
+            }
+            f.params.add(new Expression.SelectorExpr(currentSelector));
+            return f;
+        } else if ("fn:local-name".equals(functionName)) {
+            Expression.Function f = new Expression.Function("localname");
+            if (!readIf(")")) {
+                // only localname(.) and localname() are currently supported
                 read(".");
                 read(")");
             }
@@ -1061,26 +1090,28 @@ public class XPathToSQL2Converter {
         converter.read("(");
         int level = 0;
         ArrayList<String> parts = new ArrayList<String>();
+        int parseIndex;
         while (true) {
-            int parseIndex = converter.parseIndex;
+            parseIndex = converter.parseIndex;
             if (converter.readIf("(")) {
                 level++;
-            } else if (converter.readIf(")") && level-- <= 0) {
-                break;
+            } else if (converter.readIf(")")) {
+                if (level-- <= 0) {
+                    break;
+                }
             } else if (converter.readIf("|") && level == 0) {
-                String or = partList.substring(lastOrIndex, lastParseIndex);
+                String or = partList.substring(lastOrIndex, parseIndex - 1);
                 parts.add(or);
                 lastOrIndex = parseIndex;
-            } else if (currentTokenType == END) {
-                throw getSyntaxError("the query may not be empty");
+            } else if (converter.currentTokenType == END) {
+                throw getSyntaxError("empty query or missing ')'");
             } else {
                 converter.read();
             }
-            lastParseIndex = parseIndex;
         }
-        String or = partList.substring(lastOrIndex, lastParseIndex);
+        String or = partList.substring(lastOrIndex, parseIndex - 1);
         parts.add(or);        
-        String end = partList.substring(lastParseIndex + 1);
+        String end = partList.substring(parseIndex);
         Statement result = null;
         for(String p : parts) {
             String q = begin + p + end;
@@ -1091,10 +1122,14 @@ public class XPathToSQL2Converter {
             } else {
                 UnionStatement union = new UnionStatement(result, stat);
                 union.orderList = stat.orderList;
+                union.queryOptions = stat.queryOptions;
                 result = union;
             }
-            // can not use clear, because it is shared
+            // reset fields that are used in the union,
+            // but no longer in the individual statements
+            // (can not use clear, because it is shared)
             stat.orderList = new ArrayList<Order>();
+            stat.queryOptions = new QueryOptions();
         }
         return result;
     }

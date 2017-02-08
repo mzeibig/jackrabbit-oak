@@ -31,9 +31,11 @@ import java.io.InputStreamReader;
 import java.io.LineNumberReader;
 import java.io.PrintWriter;
 import java.io.Reader;
+import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.zip.GZIPInputStream;
+import java.util.zip.ZipException;
 
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
@@ -41,6 +43,7 @@ import joptsimple.OptionSpec;
 
 import org.apache.jackrabbit.oak.benchmark.util.Profiler;
 import org.apache.jackrabbit.oak.threadDump.ThreadDumpCleaner;
+import org.apache.jackrabbit.oak.threadDump.ThreadDumpConverter;
 
 public class ThreadDumpCommand implements Command {
 
@@ -48,6 +51,8 @@ public class ThreadDumpCommand implements Command {
     @Override
     public void execute(String... args) throws Exception {
         OptionParser parser = new OptionParser();
+        OptionSpec<Void> convertSpec = parser.accepts("convert", 
+                "convert the thread dumps to the standard format");
         OptionSpec<Void> filterSpec = parser.accepts("filter", 
                 "filter the thread dumps, only keep working threads");
         OptionSpec<Void> profileSpec = parser.accepts("profile", 
@@ -70,6 +75,7 @@ public class ThreadDumpCommand implements Command {
             parser.printHelpOn(System.out);
             return;
         }
+        boolean convert = options.has(convertSpec);
         boolean filter = options.has(filterSpec);
         boolean profile = options.has(profileSpec);
         boolean profileClasses = options.has(profileClassesSpec);
@@ -80,6 +86,11 @@ public class ThreadDumpCommand implements Command {
             if (file.isDirectory() || file.getName().endsWith(".gz")) {
                 file = combineAndExpandFiles(file);
                 System.out.println("Combined into " + file.getAbsolutePath());
+            }
+            if (convert) {
+                file = ThreadDumpConverter.process(file);
+                System.out.println("Converted to " + file.getAbsolutePath());
+                
             }
             if (filter) {
                 file = ThreadDumpCleaner.process(file);
@@ -143,6 +154,9 @@ public class ThreadDumpCommand implements Command {
                 return 0;
             }
             int fullThreadDumps = 0;
+            String fileModifiedTime = new Timestamp(file.lastModified()).toString();
+            writer.write("file " + file.getAbsolutePath() + "\n");
+            writer.write("lastModified " + fileModifiedTime + "\n");
             if (file.getName().endsWith(".gz")) {
                 System.out.println("Extracting " + file.getAbsolutePath());
                 InputStream fileStream = new FileInputStream(file);
@@ -161,18 +175,21 @@ public class ThreadDumpCommand implements Command {
                 } catch (EOFException e) {
                     // EOFException: Unexpected end of ZLIB input stream
                     break;
+                } catch (ZipException e) {
+                    // java.util.zip.ZipException: invalid block type
+                    break;
                 }
                 if (s == null) {
                     break;
                 }          
-                if (s.startsWith("Full thread dump")) {
+                if (s.startsWith("Full thread dump") || s.startsWith("Full Java thread dump")) {
                     fullThreadDumps++;
                 }
                 writer.println(s);
             }
             if (fullThreadDumps > 0) {
                 count++;
-                System.out.println("    (contains " + fullThreadDumps + " full thread dumps)");
+                System.out.println("    (contains " + fullThreadDumps + " full thread dumps; " + fileModifiedTime + ")");
             }
         } finally {
             if(reader != null) {

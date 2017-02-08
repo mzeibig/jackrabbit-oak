@@ -23,7 +23,7 @@ import java.util.Set;
 
 /**
  * helper class that return the list of available fixtures based on the {@code nsfixtures} system
- * property ({@code -Dnsfixtures=SEGMENT_MK}).
+ * property ({@code -Dnsfixtures=SEGMENT_TAR}).
  * 
  * See {@link FixturesHelper.Fixture} for a list of available fixtures
  */
@@ -43,7 +43,7 @@ public final class FixturesHelper {
      * default fixtures when no {@code nsfixtures} is provided
      */
     public enum Fixture {
-       DOCUMENT_NS, SEGMENT_MK, DOCUMENT_RDB, MEMORY_NS, DOCUMENT_MEM, SEGMENT_TAR
+       DOCUMENT_NS, @Deprecated SEGMENT_MK, DOCUMENT_RDB, MEMORY_NS, DOCUMENT_MEM, SEGMENT_TAR, MULTIPLEXED_SEGMENT, MULTIPLEXED_MEM
     }
 
     private static final Set<Fixture> FIXTURES;

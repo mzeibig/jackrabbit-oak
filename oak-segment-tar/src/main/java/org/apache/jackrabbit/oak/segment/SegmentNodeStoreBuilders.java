@@ -23,7 +23,7 @@ import javax.annotation.Nonnull;
 
 import org.apache.jackrabbit.oak.segment.SegmentNodeStore.SegmentNodeStoreBuilder;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
-import org.apache.jackrabbit.oak.segment.http.HttpStore;
+import org.apache.jackrabbit.oak.segment.file.ReadOnlyFileStore;
 import org.apache.jackrabbit.oak.segment.memory.MemoryStore;
 
 /**
@@ -52,10 +52,10 @@ public final class SegmentNodeStoreBuilders {
     }
 
     /**
-     * Create a {@code SegmentNodeStoreBuilder} based on a {@code HttpStore}.
+     * Create a {@code SegmentNodeStoreBuilder} based on a {@code ReadOnlyFileStore@}.
      */
     @Nonnull
-    public static SegmentNodeStoreBuilder builder(@Nonnull HttpStore store) {
+    public static SegmentNodeStoreBuilder builder(@Nonnull ReadOnlyFileStore store) {
         return SegmentNodeStore.builder(store.getRevisions(),
                 store.getReader(), store.getWriter(), store.getBlobStore());
     }

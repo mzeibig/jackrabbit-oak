@@ -30,6 +30,8 @@ import java.util.Random;
 import org.apache.jackrabbit.oak.Oak;
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
+import org.apache.jackrabbit.oak.backup.impl.FileStoreBackupImpl;
+import org.apache.jackrabbit.oak.backup.impl.FileStoreRestoreImpl;
 import org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStore;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
@@ -64,20 +66,23 @@ public class FileStoreBackupTest {
         FileStore source = newFileStore(src);
         SegmentNodeStore store = SegmentNodeStoreBuilders.builder(source)
                 .build();
+
+        FileStoreBackup fsb = new FileStoreBackupImpl();
+
         try {
             init(store);
             source.flush();
-            FileStoreBackup.backup(source.getReader(), source.getRevisions(), destination);
+            fsb.backup(source.getReader(), source.getRevisions(), destination);
             compare(source, destination);
 
             addTestContent(store);
             source.flush();
-            FileStoreBackup.backup(source.getReader(), source.getRevisions(), destination);
+            fsb.backup(source.getReader(), source.getRevisions(), destination);
             compare(source, destination);
 
             source.compact();
-            FileStoreBackup.cleanup(source);
-            FileStoreBackup.backup(source.getReader(), source.getRevisions(), destination);
+            fsb.cleanup(source);
+            fsb.backup(source.getReader(), source.getRevisions(), destination);
             compare(source, destination);
         } finally {
             source.close();
@@ -89,12 +94,15 @@ public class FileStoreBackupTest {
         FileStore source = newFileStore(src);
         SegmentNodeStore store = SegmentNodeStoreBuilders.builder(source)
                 .build();
+        FileStoreBackup fsb = new FileStoreBackupImpl();
+        FileStoreRestore fsr = new FileStoreRestoreImpl();
+
         init(store);
         source.flush();
-        FileStoreBackup.backup(source.getReader(), source.getRevisions(), destination);
+        fsb.backup(source.getReader(), source.getRevisions(), destination);
         source.close();
 
-        FileStoreRestore.restore(destination, src);
+        fsr.restore(destination, src);
         source = newFileStore(src);
         compare(source, destination);
         source.close();
@@ -122,15 +130,14 @@ public class FileStoreBackupTest {
         return nodeStore.createBlob(new ByteArrayInputStream(data));
     }
 
-    private static FileStore newFileStore(File fs) throws IOException {
+    private static FileStore newFileStore(File fs) throws Exception {
         return fileStoreBuilder(fs)
                 .withMaxFileSize(1)
                 .withGCOptions(SegmentGCOptions.defaultGCOptions().setOffline())
                 .build();
     }
 
-    private static void compare(FileStore store, File destination)
-            throws IOException {
+    private static void compare(FileStore store, File destination) throws Exception {
         FileStore backup = fileStoreBuilder(destination).build();
         assertEquals(store.getHead(), backup.getHead());
         backup.close();
@@ -140,4 +147,5 @@ public class FileStoreBackupTest {
         new Oak(store).with(new OpenSecurityProvider())
                 .with(new InitialContent()).createContentRepository();
     }
+
 }

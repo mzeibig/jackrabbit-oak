@@ -35,6 +35,10 @@ public interface IndexConstants {
 
     String REINDEX_ASYNC_PROPERTY_NAME = "reindex-async";
 
+    String INDEXING_MODE_SYNC = "sync";
+
+    String INDEXING_MODE_NRT = "nrt";
+
     String ASYNC_PROPERTY_NAME = "async";
 
     String ASYNC_REINDEX_VALUE = "async-reindex";
@@ -69,8 +73,9 @@ public interface IndexConstants {
     String QUERY_PATHS = "queryPaths";
 
     /**
-     * Hidden property which stores the indexPath which can be used by
-     * IndexEditors
+     * Property name for indicating that given index is corrupt and should be excluded
+     * from further indexing. Its value is the date when this index was marked as
+     * corrupt
      */
-    String INDEX_PATH = ":indexPath";
+    String CORRUPT_PROPERTY_NAME = "corrupt";
 }

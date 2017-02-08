@@ -50,6 +50,12 @@ the authorizables can later on be identified as external users.
 - `rep:externalId` : This allows to identify the external users, know the associated IDP and distinguish them from others.
 - `rep:lastSynced` : Sync timestamp to mark the external user/group valid for the configurable time (to reduce expensive syncing). Once expired, they will be validated against the 3rd party system again.
 
+NOTE: Since Oak 1.5.8 the system-maintained property `rep:externalId` is 
+protected and can not be altered using regular JCR and Jackrabbit 
+API, irrespective of the permission setup of the editing session. For 
+backwards compatibility this protection can be turned off. See [OAK-4301] 
+for further details.
+
 The [DefaultSyncContext] is exported as part of the 'basic' package space and
 may be used to provide custom implementations.
 
@@ -106,6 +112,8 @@ will re-create the `rep:externalPrincipalNames` property.
 <a name="validation"/>
 #### Validation
 
+##### rep:externalPrincipalNames
+
 As of Oak 1.5.3 a dedicated `Validator` implementation asserts that the protected,
 system-maintained property `rep:externalPrincipalNames` is only written by the 
 internal system session. 
@@ -119,10 +127,21 @@ with external user/group accounts.
 
 | Code              | Message                                                  |
 |-------------------|----------------------------------------------------------|
-| 0070              | Attempt to create, modify or remove the system property rep:externalPrincipalNames |
-| 0071              | Attempt to write rep:externalPrincipalNames with a type other than Type.STRINGS |
-| 0072              | Property rep:externalPrincipalNames requires rep:externalId to be present on the Node. |
-| 0073              | Property rep:externalId cannot be removed if rep:externalPrincipalNames is present. |
+| 0070              | Attempt to create, modify or remove the system property 'rep:externalPrincipalNames' |
+| 0071              | Attempt to write 'rep:externalPrincipalNames' with a type other than Type.STRINGS |
+| 0072              | Property 'rep:externalPrincipalNames' requires 'rep:externalId' to be present on the Node. |
+| 0073              | Property 'rep:externalId' cannot be removed if 'rep:externalPrincipalNames' is present. |
+
+##### rep:externalId
+
+If protection of the `rep:externalId` property is enabled (since Oak 1.5.8) the
+validator performs the following checks:
+ 
+| Code              | Message                                                  |
+|-------------------|----------------------------------------------------------|
+| 0074              | Attempt to add, modify or remove the system maintained property 'rep:externalId'. |
+| 0075              | Property 'rep:externalId' may only have a single value of type STRING. |
+ 
 
 <a name="configuration"/>
 ### Configuration
@@ -141,16 +160,17 @@ The default `SyncHandler` implementations are configured via [DefaultSyncConfig]
 | User Dynamic Membership       | `user.dynamicMembership`      | Enabling dynamic membership for external users. |
 | User Path Prefix              | `user.pathPrefix`             | The path prefix used when creating new users. |
 | User property mapping         | `user.propertyMapping`        | List mapping definition of local properties from external ones. eg: 'profile/email=mail'.Use double quotes for fixed values. eg: 'profile/nt:primaryType="nt:unstructured" |
+| Disable missing users         | `user.disableMissing`         | By default, users that no longer exist on the external provider will be locally removed. Set this property to `true` to [disable](https://jackrabbit.apache.org/api/2.8/org/apache/jackrabbit/api/security/user/User.html#disable(java.lang.String)) them instead and have them re-enabled if they become available again. |
 | Group auto membership         | `group.autoMembership`        | List of groups that a synced group is added to automatically |
 | Group Expiration Time         | `group.expirationTime`        | Duration until a synced group expires (eg. '1h 30m' or '1d'). |
 | Group Path Prefix             | `group.pathPrefix`            | The path prefix used when creating new groups. |
 | Group property mapping        | `group.propertyMapping`       | List mapping definition of local properties from external ones. |
 | | | |
 
-#### Configuration of the ExternalPrincipalConfiguration
+#### Configuration of the 'Apache Jackrabbit Oak External PrincipalConfiguration'
 
-Please note that the [ExternalPrincipalConfiguration] comes with a dedicated
-`RepositoryInitializer`, which requires the repository to be (re)initialized
+Please note that the `ExternalPrincipalConfiguration` _("Apache Jackrabbit Oak External PrincipalConfiguration")_ 
+comes with a dedicated `RepositoryInitializer`, which requires the repository to be (re)initialized
 once the module `oak-auth-external` is installed.
 
 The recommended way to assert a proper init, is to add 
@@ -158,7 +178,14 @@ The recommended way to assert a proper init, is to add
 as additional value to the `requiredServicePids` configuration option of the 
 `SecurityProviderRegistration` _("Apache Jackrabbit Oak SecurityProvider")_.
 
-See section [Introduction to Oak Security](../introduction.html) for further details on the `SecurityProviderRegistration`.
+See section [Introduction to Oak Security](../../introduction.html) for further details on the `SecurityProviderRegistration`.
+
+The `ExternalPrincipalConfiguration` defines the following configuration options:
+     
+| Name                         | Property                      | Description                              |
+|------------------------------|-------------------------------|------------------------------------------|
+| External Identity Protection | `protectExternalId`           | Enables protection of the system maintained `rep:externalId` properties |
+| | | |
 
 <!-- references -->
 [SyncContext]: /oak/docs/apidocs/org/apache/jackrabbit/oak/spi/security/authentication/external/SyncContext.html
@@ -168,7 +195,7 @@ See section [Introduction to Oak Security](../introduction.html) for further det
 [DefaultSyncedIdentity]: /oak/docs/apidocs/org/apache/jackrabbit/oak/spi/security/authentication/external/basic/DefaultSyncedIdentity.html
 [DefaultSyncHandler]: /oak/docs/apidocs/org/apache/jackrabbit/oak/spi/security/authentication/external/impl/DefaultSyncHandler.html
 [ExternalIdentityRef]: /oak/docs/apidocs/org/apache/jackrabbit/oak/spi/security/authentication/external/ExternalIdentityRef.html
-[ExternalPrincipalConfiguration]: /oak/docs/apidocs/org/apache/jackrabbit/oak/spi/security/authentication/external/impl/principal/ExternalPrincipalConfiguration.html
 [DynamicSyncContext]: /oak/docs/apidocs/org/apache/jackrabbit/oak/spi/security/authentication/external/impl/principal/DynamicSyncContext.html
 [OAK-4101]: https://issues.apache.org/jira/browse/OAK-4101
 [OAK-2687]: https://issues.apache.org/jira/browse/OAK-2687
+[OAK-4301]: https://issues.apache.org/jira/browse/OAK-4301

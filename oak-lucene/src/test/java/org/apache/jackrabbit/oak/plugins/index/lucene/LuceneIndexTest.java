@@ -46,13 +46,13 @@ import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstant
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PERSISTENCE_FILE;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PERSISTENCE_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PERSISTENCE_PATH;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexEditorContext.getIndexWriterConfig;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexEditorContext.newIndexDirectory;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.TestUtil.NT_TEST;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.TestUtil.createNodeWithType;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.TestUtil.newLuceneIndexDefinitionV2;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.util.LuceneIndexHelper.newLuceneIndexDefinition;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.util.LuceneIndexHelper.newLucenePropertyIndexDefinition;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.writer.IndexWriterUtils.getIndexWriterConfig;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.writer.IndexWriterUtils.newIndexDirectory;
 import static org.apache.jackrabbit.oak.plugins.memory.PropertyStates.createProperty;
 import static org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent.INITIAL_CONTENT;
 
@@ -66,7 +66,6 @@ import java.util.Map;
 import java.util.Set;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import javax.jcr.PropertyType;
 
 import org.apache.commons.io.FileUtils;
@@ -350,8 +349,8 @@ public class LuceneIndexTest {
 
         //Ensure that Lucene actually removes deleted docs
         NodeBuilder idx = builder.child(INDEX_DEFINITIONS_NAME).child("lucene");
-        purgeDeletedDocs(idx, new IndexDefinition(root, idx));
-        int numDeletes = getDeletedDocCount(idx, new IndexDefinition(root, idx));
+        purgeDeletedDocs(idx, new IndexDefinition(root, idx.getNodeState(), "/foo"));
+        int numDeletes = getDeletedDocCount(idx, new IndexDefinition(root, idx.getNodeState(), "/foo"));
         Assert.assertEquals(0, numDeletes);
 
         //Update the IndexSearcher
@@ -372,13 +371,13 @@ public class LuceneIndexTest {
     }
 
     private void purgeDeletedDocs(NodeBuilder idx, IndexDefinition definition) throws IOException {
-        IndexWriter writer = new IndexWriter(newIndexDirectory(definition, idx), getIndexWriterConfig(definition, true));
+        IndexWriter writer = new IndexWriter(newIndexDirectory(definition, idx, LuceneIndexConstants.INDEX_DATA_CHILD_NAME, false, null), getIndexWriterConfig(definition, true));
         writer.forceMergeDeletes();
         writer.close();
     }
 
     public int getDeletedDocCount(NodeBuilder idx, IndexDefinition definition) throws IOException {
-        IndexReader reader = DirectoryReader.open(newIndexDirectory(definition, idx));
+        IndexReader reader = DirectoryReader.open(newIndexDirectory(definition, idx, LuceneIndexConstants.INDEX_DATA_CHILD_NAME, false, null));
         int numDeletes = reader.numDeletedDocs();
         reader.close();
         return numDeletes;
@@ -713,7 +712,7 @@ public class LuceneIndexTest {
         tracker = new IndexTracker();
         ((Observable)nodeStore).addObserver(new Observer() {
             @Override
-            public void contentChanged(@Nonnull NodeState root, @Nullable CommitInfo info) {
+            public void contentChanged(@Nonnull NodeState root, @Nonnull CommitInfo info) {
                 tracker.update(root);
             }
         });
@@ -772,7 +771,7 @@ public class LuceneIndexTest {
         NodeBuilder index = builder.child(INDEX_DEFINITIONS_NAME);
         NodeBuilder defnState =
                 newLucenePropertyIndexDefinition(index, "lucene", ImmutableSet.of("foo", "foo2", "foo3"), null);
-        IndexDefinition definition = new IndexDefinition(root, defnState.getNodeState());
+        IndexDefinition definition = new IndexDefinition(root, defnState.getNodeState(), "/foo");
 
         //1. Create index in two increments
         NodeState before = builder.getNodeState();
@@ -802,7 +801,7 @@ public class LuceneIndexTest {
         tracker.update(indexed);
 
         defnState = builder.child(INDEX_DEFINITIONS_NAME).child("lucene");
-        definition = new IndexDefinition(root, defnState.getNodeState());
+        definition = new IndexDefinition(root, defnState.getNodeState(), "/foo");
         assertQuery(tracker, indexed, "foo2", "bar2");
         //If reindex case handled properly then invalid count should be zero
         assertEquals(0, copier.getInvalidFileCount());
@@ -887,12 +886,10 @@ public class LuceneIndexTest {
         indexed = builder.getNodeState();
         tracker.update(indexed);
 
-        try {
-            queryIndex.getPlans(filter, null, indexed);
-            fail("Expecting UnsupportedOperationException exception");
-        } catch (UnsupportedOperationException ignore){
-            // expected
-        }
+        List<IndexPlan> list = queryIndex.getPlans(filter, null, indexed);
+        assertEquals("There must be only one plan", 1, list.size());
+        IndexPlan plan = list.get(0);
+        assertEquals("Didn't get the expected plan", "/test/oak:index/lucene", plan.getPlanName());
     }
 
     @Test
@@ -906,33 +903,13 @@ public class LuceneIndexTest {
 
         NodeState indexed = HOOK.processCommit(before, after, CommitInfo.EMPTY);
 
-        IndexDefinition defn = new IndexDefinition(root, indexed.getChildNode("oak:index").getChildNode("lucene"));
-        assertEquals("/oak:index/lucene", defn.getIndexName());
-        assertEquals("/oak:index/lucene", defn.getIndexPathFromConfig());
+        String indexPath = "/oak:index/lucene";
+        IndexDefinition defn = new IndexDefinition(root, indexed.getChildNode("oak:index").getChildNode("lucene"), indexPath);
+
+        assertEquals(indexPath, defn.getIndexName());
+        assertEquals(indexPath, defn.getIndexPath());
     }
 
-
-    @Test
-    public void luceneWithCopyOnReadDir_Compat() throws Exception{
-        NodeBuilder index = builder.child(INDEX_DEFINITIONS_NAME);
-        newLucenePropertyIndexDefinition(index, "lucene", ImmutableSet.of("foo", "foo2"), null);
-
-        NodeState before = builder.getNodeState();
-        builder.setProperty("foo", "bar");
-        NodeState after = builder.getNodeState();
-
-        NodeState indexed = HOOK.processCommit(before, after,CommitInfo.EMPTY);
-
-        builder = indexed.builder();
-        builder.getChildNode("oak:index").getChildNode("lucene").removeProperty(IndexConstants.INDEX_PATH);
-        indexed = builder.getNodeState();
-
-        File indexRootDir = new File(getIndexDir());
-        tracker = new IndexTracker(new IndexCopier(sameThreadExecutor(), indexRootDir));
-        tracker.update(indexed);
-
-        assertQuery(tracker, indexed, "foo", "bar");
-    }
 
     @After
     public void cleanUp(){

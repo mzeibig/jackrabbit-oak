@@ -23,7 +23,7 @@
   <parent>
     <groupId>org.apache.jackrabbit</groupId>
     <artifactId>oak-parent</artifactId>
-    <version>1.5.7</version>
+    <version>1.6.0</version>
     <relativePath>../oak-parent/pom.xml</relativePath>
   </parent>
 
@@ -79,7 +79,7 @@
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-segment-tar</artifactId>
-      <version>${segment.tar.version}</version>
+      <version>${project.version}</version>
     </dependency>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
@@ -107,6 +107,10 @@
       <artifactId>commons-lang</artifactId>
     </dependency>
     <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-math3</artifactId>
+    </dependency>
+    <dependency>
       <groupId>net.sf.jopt-simple</groupId>
       <artifactId>jopt-simple</artifactId>
       <version>4.6</version>
@@ -119,7 +123,6 @@
     <dependency>
       <groupId>org.apache.tomcat</groupId>
       <artifactId>tomcat-jdbc</artifactId>
-      <version>7.0.64</version>
     </dependency>
 
     <!-- Logging -->

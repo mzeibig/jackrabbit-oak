@@ -32,8 +32,6 @@ enum Mode {
     UPGRADE("upgrade", new UpgradeCommand()),
     SCALABILITY("scalability", new ScalabilityCommand()),
     EXPLORE("explore", new ExploreCommand()),
-    PRIMARY("primary", new PrimaryCommand()),
-    STANDBY("standy", new StandbyCommand()),
     CHECKPOINTS("checkpoints", new CheckpointsCommand()),
     RECOVERY("recovery", new RecoveryCommand()),
     REPAIR("repair", new RepairCommand()),
@@ -41,10 +39,12 @@ enum Mode {
     GARBAGE("garbage", new GarbageCommand()),
     TARMKDIFF("tarmkdiff", new FileStoreDiffCommand()),
     TARMKRECOVERY("tarmkrecovery", new FileStoreRevisionRecoveryCommand()),
-    DUMPDATASTOREREFS("dumpdatastorerefs", new DataStoreCheckCommand()),
+    DATASTORECHECK("datastorecheck", new DataStoreCheckCommand()),
     RESETCLUSTERID("resetclusterid", new ResetClusterIdCommand()),
     PERSISTENTCACHE("persistentcache", new PersistentCacheCommand()),
     THREADDUMP("threaddump", new ThreadDumpCommand()),
+    DATASTORECACHEUPGRADE("datastorecacheupgrade", new DataStoreCacheUpgradeCommand()),
+    INDEX("index", new IndexCommand()),
     HELP("help", new HelpCommand());
 
     private final String name;

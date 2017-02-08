@@ -17,6 +17,7 @@
 
 package org.apache.jackrabbit.oak.segment;
 
+import javax.annotation.Nonnull;
 import javax.jcr.Value;
 
 import org.apache.jackrabbit.commons.SimpleValueFactory;
@@ -30,7 +31,7 @@ import org.apache.jackrabbit.oak.spi.state.NodeStore;
 class SegmentDiscoveryLiteDescriptors implements Descriptors {
 
     /**
-     * Name of the repository descriptor via which the clusterView is published - which is the raison d'etre of the
+     * Name of the repository descriptor via which the clusterView is published - which is the reason d'etre of the
      * DocumentDiscoveryLiteService TODO: move this constant to a generic place for both segment and document
      **/
     private static final String OAK_DISCOVERYLITE_CLUSTERVIEW = "oak.discoverylite.clusterview";
@@ -43,23 +44,24 @@ class SegmentDiscoveryLiteDescriptors implements Descriptors {
         this.store = store;
     }
 
+    @Nonnull
     @Override
     public String[] getKeys() {
         return new String[] {OAK_DISCOVERYLITE_CLUSTERVIEW};
     }
 
     @Override
-    public boolean isStandardDescriptor(String key) {
+    public boolean isStandardDescriptor(@Nonnull String key) {
         return OAK_DISCOVERYLITE_CLUSTERVIEW.equals(key);
     }
 
     @Override
-    public boolean isSingleValueDescriptor(String key) {
+    public boolean isSingleValueDescriptor(@Nonnull String key) {
         return OAK_DISCOVERYLITE_CLUSTERVIEW.equals(key);
     }
 
     @Override
-    public Value getValue(String key) {
+    public Value getValue(@Nonnull String key) {
         if (!OAK_DISCOVERYLITE_CLUSTERVIEW.equals(key)) {
             return null;
         }
@@ -67,7 +69,7 @@ class SegmentDiscoveryLiteDescriptors implements Descriptors {
     }
 
     @Override
-    public Value[] getValues(String key) {
+    public Value[] getValues(@Nonnull String key) {
         if (!OAK_DISCOVERYLITE_CLUSTERVIEW.equals(key)) {
             return null;
         }

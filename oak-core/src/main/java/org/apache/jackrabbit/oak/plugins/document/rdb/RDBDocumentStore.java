@@ -279,6 +279,27 @@ public class RDBDocumentStore implements DocumentStore {
     }
 
     @Override
+    public <T extends Document> int remove(Collection<T> collection, String indexedProperty, long startValue, long endValue)
+            throws DocumentStoreException {
+        try {
+            List<QueryCondition> conditions = new ArrayList<QueryCondition>();
+            conditions.add(new QueryCondition(indexedProperty, ">", startValue));
+            conditions.add(new QueryCondition(indexedProperty, "<", endValue));
+            return deleteWithCondition(collection, conditions);
+        } finally {
+            if (collection == Collection.NODES) {
+                // this method is currently being used only for Journal
+                // collection while GC. But, to keep sanctity of the API, we
+                // need to acknowledge that Nodes collection could've been used.
+                // But, in this signature, there's no useful way to invalidate
+                // cache.
+                // So, we use the hammer for this task
+                invalidateCache();
+            }
+        }
+    }
+
+    @Override
     public <T extends Document> boolean create(Collection<T> collection, List<UpdateOp> updateOps) {
         return internalCreate(collection, updateOps);
     }
@@ -480,7 +501,7 @@ public class RDBDocumentStore implements DocumentStore {
             return result;
         } catch (SQLException ex) {
             this.ch.rollbackConnection(connection);
-            throw new DocumentStoreException(ex);
+            throw handleException("update failed for: " + keysToUpdate, ex, collection, keysToUpdate);
         } finally {
             this.ch.closeConnection(connection);
         }
@@ -1515,7 +1536,7 @@ public class RDBDocumentStore implements DocumentStore {
             db.delete(connection, tmd, Collections.singletonList(id));
             connection.commit();
         } catch (Exception ex) {
-            throw new DocumentStoreException(ex);
+            throw handleException("removing " + id, ex, collection, id);
         } finally {
             this.ch.closeConnection(connection);
         }
@@ -1531,7 +1552,7 @@ public class RDBDocumentStore implements DocumentStore {
                 numDeleted += db.delete(connection, tmd, sublist);
                 connection.commit();
             } catch (Exception ex) {
-                throw new DocumentStoreException(ex);
+                throw handleException("removing " + ids, ex, collection, ids);
             } finally {
                 this.ch.closeConnection(connection);
             }
@@ -1555,12 +1576,29 @@ public class RDBDocumentStore implements DocumentStore {
                     numDeleted += db.delete(connection, tmd, subMap);
                     connection.commit();
                 } catch (Exception ex) {
-                    throw DocumentStoreException.convert(ex);
+                    Set<String> ids = subMap.keySet();
+                    throw handleException("deleting " + ids, ex, collection, ids);
                 } finally {
                     this.ch.closeConnection(connection);
                 }
                 subMap.clear();
             }
+        }
+        return numDeleted;
+    }
+
+    private <T extends Document> int deleteWithCondition(Collection<T> collection, List<QueryCondition> conditions) {
+        int numDeleted = 0;
+        RDBTableMetaData tmd = getTable(collection);
+        Connection connection = null;
+        try {
+            connection = this.ch.getRWConnection();
+            numDeleted = db.deleteWithCondition(connection, tmd, conditions);
+            connection.commit();
+        } catch (Exception ex) {
+            throw DocumentStoreException.convert(ex, "deleting " + collection + ": " + conditions);
+        } finally {
+            this.ch.closeConnection(connection);
         }
         return numDeleted;
     }
@@ -1623,7 +1661,7 @@ public class RDBDocumentStore implements DocumentStore {
             }
             String message = String.format("Update for %s failed%s", document.getId(), addDiags);
             LOG.debug(message, ex);
-            throw new DocumentStoreException(message, ex);
+            throw handleException(message, ex, collection, document.getId());
         } finally {
             this.ch.closeConnection(connection);
         }
@@ -1721,7 +1759,7 @@ public class RDBDocumentStore implements DocumentStore {
                 LOG.debug("additional diagnostics: " + messages);
             }
 
-            throw new DocumentStoreException(message, ex);
+            throw handleException(message, ex, collection, ids);
         } finally {
             this.ch.closeConnection(connection);
         }
@@ -1888,6 +1926,21 @@ public class RDBDocumentStore implements DocumentStore {
 
     protected NodeDocumentCache getNodeDocumentCache() {
         return nodesCache;
+    }
+
+    private <T extends Document> DocumentStoreException handleException(String message, Exception ex, Collection<T> collection,
+            java.util.Collection<String> ids) {
+        if (collection == Collection.NODES) {
+            for (String id : ids) {
+                invalidateCache(collection, id, false);
+            }
+        }
+        return DocumentStoreException.convert(ex, message);
+    }
+
+    private <T extends Document> DocumentStoreException handleException(String message, Exception ex, Collection<T> collection,
+            String id) {
+        return handleException(message, ex, collection, Collections.singleton(id));
     }
 
     // slightly extended query support

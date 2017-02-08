@@ -26,10 +26,12 @@ import org.apache.jackrabbit.oak.plugins.segment.Compactor;
 import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeState;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStore.ReadOnlyStore;
+import org.apache.jackrabbit.oak.plugins.segment.file.InvalidFileStoreVersionException;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+@Deprecated
 public class FileStoreRestore {
 
     private static final Logger log = LoggerFactory
@@ -39,8 +41,8 @@ public class FileStoreRestore {
 
     private static final String JOURNAL_FILE_NAME = "journal.log";
 
-    public static void restore(File source, File destination)
-            throws IOException {
+    @Deprecated
+    public static void restore(File source, File destination) throws IOException, InvalidFileStoreVersionException {
         if (!validFileStore(source)) {
             throw new IOException("Folder " + source
                     + " is not a valid FileStore directory");
@@ -65,10 +67,12 @@ public class FileStoreRestore {
         log.info("Restore finished in {}.", watch);
     }
 
+    @Deprecated
     public static void restore(File source, NodeStore store) {
         log.warn("Restore not available as an online operation.");
     }
 
+    @Deprecated
     private static boolean validFileStore(File source) {
         if (source == null || !source.isDirectory()) {
             return false;

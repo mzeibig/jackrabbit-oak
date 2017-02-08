@@ -52,6 +52,7 @@ import com.google.common.util.concurrent.MoreExecutors;
 import org.apache.commons.io.FileUtils;
 import org.apache.jackrabbit.oak.commons.IOUtils;
 import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
+import org.apache.jackrabbit.oak.plugins.index.lucene.directory.LocalIndexFile;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.lucene.store.Directory;
@@ -96,14 +97,13 @@ public class IndexCopierTest {
 
     @Before
     public void setUp(){
-        builder.setProperty(IndexConstants.INDEX_PATH, indexPath);
         LuceneIndexEditorContext.configureUniqueId(builder);
     }
 
     @Test
     public void basicTest() throws Exception{
         Directory baseDir = new RAMDirectory();
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier c1 = new RAMIndexCopier(baseDir, sameThreadExecutor(), getWorkDir());
 
         Directory remote = new RAMDirectory();
@@ -136,7 +136,7 @@ public class IndexCopierTest {
                 super.sync(names);
             }
         };
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier c1 = new RAMIndexCopier(baseDir, sameThreadExecutor(), getWorkDir(), true);
 
         Directory remote = new RAMDirectory();
@@ -164,7 +164,7 @@ public class IndexCopierTest {
     @Test
     public void nonExistentFile() throws Exception{
         Directory baseDir = new RAMDirectory();
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         CollectingExecutor executor = new CollectingExecutor();
         IndexCopier c1 = new RAMIndexCopier(baseDir, executor, getWorkDir(), true);
 
@@ -183,7 +183,7 @@ public class IndexCopierTest {
 
     @Test
     public void basicTestWithFS() throws Exception{
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier c1 = new IndexCopier(sameThreadExecutor(), getWorkDir());
 
         Directory remote = new RAMDirectory();
@@ -210,9 +210,29 @@ public class IndexCopierTest {
         assertEquals(1, td.size());
     }
 
+
+    @Test
+    public void multiDirNames() throws Exception{
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
+        IndexCopier c1 = new IndexCopier(sameThreadExecutor(), getWorkDir());
+
+        Directory remote = new CloseSafeDir();
+        byte[] t1 = writeFile(remote, "t1");
+        byte[] t2 = writeFile(remote , "t2");
+
+        Directory w1 = c1.wrapForRead(indexPath, defn, remote, ":data");
+
+        readAndAssert(w1, "t1", t1);
+
+        Directory w2 = c1.wrapForRead(indexPath, defn, remote, ":private-data");
+        w2.close();
+
+        readAndAssert(w1, "t1", t1);
+    }
+
     @Test
     public void deleteOldPostReindex() throws Exception{
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier c1 = new IndexCopier(sameThreadExecutor(), getWorkDir());
 
         Directory remote = new CloseSafeDir();
@@ -229,7 +249,7 @@ public class IndexCopierTest {
         assertTrue(new File(indexDir, "t1").exists());
 
         doReindex(builder);
-        defn = new IndexDefinition(root, builder.getNodeState());
+        defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
 
         //Close old version
         w1.close();
@@ -253,7 +273,7 @@ public class IndexCopierTest {
     @Test
     public void concurrentRead() throws Exception{
         Directory baseDir = new RAMDirectory();
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         CollectingExecutor executor = new CollectingExecutor();
 
         IndexCopier c1 = new RAMIndexCopier(baseDir, executor, getWorkDir());
@@ -291,7 +311,7 @@ public class IndexCopierTest {
     @Test
     public void copyInProgressStats() throws Exception{
         Directory baseDir = new RAMDirectory();
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
 
         final List<ListenableFuture<?>> submittedTasks = Lists.newArrayList();
         ExecutorService executor = new ForwardingListeningExecutorService() {
@@ -362,7 +382,7 @@ public class IndexCopierTest {
     @Test
     public void reuseLocalDir() throws Exception{
         Directory baseDir = new RAMDirectory();
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier c1 = new RAMIndexCopier(baseDir, sameThreadExecutor(), getWorkDir());
 
         TestRAMDirectory remote = new TestRAMDirectory();
@@ -397,7 +417,7 @@ public class IndexCopierTest {
     @Test
     public void deleteCorruptedFile() throws Exception{
         Directory baseDir = new RAMDirectory();
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         RAMIndexCopier c1 = new RAMIndexCopier(baseDir, sameThreadExecutor(), getWorkDir());
 
         Directory remote = new RAMDirectory(){
@@ -431,7 +451,7 @@ public class IndexCopierTest {
         Directory baseDir = new CloseSafeDir();
 
 
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier c1 = new RAMIndexCopier(baseDir, sameThreadExecutor(), getWorkDir());
 
         Directory r1 = new RAMDirectory();
@@ -474,7 +494,7 @@ public class IndexCopierTest {
             }
         };
 
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier c1 = new RAMIndexCopier(baseDir, sameThreadExecutor(), getWorkDir());
 
         Directory r1 = new RAMDirectory();
@@ -501,7 +521,7 @@ public class IndexCopierTest {
         w2.close();
 
         assertEquals(1, c1.getFailedToDeleteFiles().size());
-        IndexCopier.LocalIndexFile testFile = c1.getFailedToDeleteFiles().values().iterator().next();
+        LocalIndexFile testFile = c1.getFailedToDeleteFiles().values().iterator().next();
 
         assertEquals(1, testFile.getDeleteAttemptCount());
         assertEquals(IOUtils.humanReadableByteCount(t1.length), c1.getGarbageSize());
@@ -525,7 +545,7 @@ public class IndexCopierTest {
     public void deletedOnlyFilesForOlderVersion() throws Exception{
         Directory baseDir = new CloseSafeDir();
 
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier copier = new RAMIndexCopier(baseDir, sameThreadExecutor(), getWorkDir());
 
         //1. Open a local and read t1 from remote
@@ -555,7 +575,7 @@ public class IndexCopierTest {
 
         IndexCopier copier = new IndexCopier(sameThreadExecutor(), getWorkDir());
 
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         Directory dir = copier.wrapForWrite(defn, remote, false, INDEX_DATA_CHILD_NAME);
 
         byte[] t1 = writeFile(dir, "t1");
@@ -573,8 +593,7 @@ public class IndexCopierTest {
 
         IndexCopier copier = new IndexCopier(sameThreadExecutor(), getWorkDir());
 
-        builder.setProperty(IndexConstants.INDEX_PATH, "foo");
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         Directory dir = copier.wrapForWrite(defn, remote, false, INDEX_DATA_CHILD_NAME);
 
         byte[] t1 = writeFile(dir, "t1");
@@ -595,7 +614,7 @@ public class IndexCopierTest {
     @Test
     public void copyOnWriteBasics() throws Exception{
         Directory baseDir = new CloseSafeDir();
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier copier = new RAMIndexCopier(baseDir, sameThreadExecutor(), getWorkDir());
 
         Directory remote = new RAMDirectory();
@@ -655,7 +674,7 @@ public class IndexCopierTest {
     @Test
     public void cowExistingLocalFileNotDeleted() throws Exception{
         Directory baseDir = new CloseSafeDir();
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier copier = new RAMIndexCopier(baseDir, sameThreadExecutor(), getWorkDir());
 
         Directory remote = new CloseSafeDir();
@@ -699,7 +718,7 @@ public class IndexCopierTest {
                 return super.openInput(name, context);
             }
         };
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier copier = new RAMIndexCopier(baseDir, sameThreadExecutor(), getWorkDir());
 
         final Set<String> readRemotes = newHashSet();
@@ -736,7 +755,7 @@ public class IndexCopierTest {
     public void cowCopyDoneOnClose() throws Exception{
         final CollectingExecutor executor = new CollectingExecutor();
         Directory baseDir = new CloseSafeDir();
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier copier = new RAMIndexCopier(baseDir, executor, getWorkDir());
 
         Directory remote = new CloseSafeDir();
@@ -798,7 +817,7 @@ public class IndexCopierTest {
     public void cowCopyDoneOnCloseExceptionHandling() throws Exception{
         final CollectingExecutor executor = new CollectingExecutor();
         Directory baseDir = new CloseSafeDir();
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier copier = new RAMIndexCopier(baseDir, executor, getWorkDir());
 
         Directory remote = new CloseSafeDir();
@@ -844,6 +863,7 @@ public class IndexCopierTest {
 
         //Let copy to proceed
         copyLatch.countDown();
+        copyTasks.get();
 
         //Now wait for close to finish
         closeTasks.get();
@@ -856,7 +876,7 @@ public class IndexCopierTest {
     public void cowFailureInCopy() throws Exception{
         ExecutorService executorService = Executors.newFixedThreadPool(2);
         Directory baseDir = new CloseSafeDir();
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier copier = new RAMIndexCopier(baseDir, executorService, getWorkDir());
 
         final Set<String> toFail = Sets.newHashSet();
@@ -889,7 +909,7 @@ public class IndexCopierTest {
     public void cowPoolClosedWithTaskInQueue() throws Exception{
         ExecutorService executorService = Executors.newFixedThreadPool(2);
         Directory baseDir = new CloseSafeDir();
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
         IndexCopier copier = new RAMIndexCopier(baseDir, executorService, getWorkDir());
 
         final Set<String> toPause = Sets.newHashSet();
@@ -950,9 +970,7 @@ public class IndexCopierTest {
         executor.setForwardingExecutor(executorService);
 
         Directory baseDir = new CloseSafeDir();
-        String indexPath = "/foo";
-        builder.setProperty(IndexConstants.INDEX_PATH, indexPath);
-        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), indexPath);
         IndexCopier copier = new RAMIndexCopier(baseDir, executor, getWorkDir(), true);
 
         Directory remote = new CloseSafeDir();
@@ -998,6 +1016,41 @@ public class IndexCopierTest {
         assertTrue("f2 should exist", remote.fileExists("f2"));
 
         executorService.shutdown();
+    }
+
+    @Test
+    public void directoryContentMismatch_COR() throws Exception{
+        Directory baseDir = new CloseSafeDir();
+        IndexDefinition defn = new IndexDefinition(root, builder.getNodeState(), "/foo");
+        IndexCopier copier = new RAMIndexCopier(baseDir, sameThreadExecutor(), getWorkDir(), true);
+
+        Directory remote = new RAMDirectory();
+        byte[] t1 = writeFile(remote, "t1");
+        byte[] t2 = writeFile(remote, "t2");
+
+        //State of remote directory should set before wrapping as later
+        //additions would not be picked up given COW assume remote directory
+        //to be read only
+        Directory local = copier.wrapForRead("/foo", defn, remote, INDEX_DATA_CHILD_NAME);
+
+        readAndAssert(local, "t1", t1);
+        readAndAssert(local, "t2", t2);
+
+        copier.close();
+
+        //2. Modify the same file in remote directory simulating rollback scenario
+        Directory remoteModified = new RAMDirectory();
+        t1 = writeFile(remoteModified, "t1");
+
+        //3. Reopen the copier
+        copier = new RAMIndexCopier(baseDir, sameThreadExecutor(), getWorkDir(), true);
+
+        //4. Post opening local the content should be in sync with remote
+        //So t1 should be recreated matching remote
+        //t2 should be removed
+        local = copier.wrapForRead("/foo", defn, remoteModified, INDEX_DATA_CHILD_NAME);
+        readAndAssert(baseDir, "t1", t1);
+        assertFalse(baseDir.fileExists("t2"));
     }
 
     private static void doReindex(NodeBuilder builder) {

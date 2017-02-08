@@ -24,6 +24,7 @@ import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import javax.jcr.PropertyType;
@@ -34,6 +35,7 @@ import org.apache.jackrabbit.oak.api.QueryEngine;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.namepath.NamePathMapper;
+import org.apache.jackrabbit.oak.query.QueryOptions.Traversal;
 import org.apache.jackrabbit.oak.query.ast.AstElementFactory;
 import org.apache.jackrabbit.oak.query.ast.BindVariableValueImpl;
 import org.apache.jackrabbit.oak.query.ast.ColumnImpl;
@@ -161,6 +163,15 @@ public class SQL2Parser {
             read("BY");
             orderings = parseOrder();
         }
+        QueryOptions options = new QueryOptions();
+        if (readIf("OPTION")) {
+            read("(");
+            if (readIf("TRAVERSAL")) {
+                String n = readName().toUpperCase(Locale.ENGLISH);
+                options.traversal = Traversal.valueOf(n);
+            }
+            read(")");
+        }
         if (!currentToken.isEmpty()) {
             throw getSyntaxError("<end>");
         }
@@ -168,6 +179,7 @@ public class SQL2Parser {
         q.setExplain(explain);
         q.setMeasure(measure);
         q.setInternal(isInternal(query));
+        q.setQueryOptions(options);
 
         if (initialise) {
             try {
@@ -626,7 +638,7 @@ public class SQL2Parser {
     private DynamicOperandImpl parseExpressionFunction(String functionName) throws ParseException {
         DynamicOperandImpl op;
         if ("LENGTH".equalsIgnoreCase(functionName)) {
-            op = factory.length(parsePropertyValue(readName()));
+            op = factory.length(parseDynamicOperand());
         } else if ("NAME".equalsIgnoreCase(functionName)) {
             if (isToken(")")) {
                 op = factory.nodeName(getOnlySelectorName());

@@ -98,8 +98,9 @@ public class SegmentBufferWriterPool implements WriteOperationHandler {
         this.gcGeneration = checkNotNull(gcGeneration);
     }
 
+    @Nonnull
     @Override
-    public RecordId execute(WriteOperation writeOperation) throws IOException {
+    public RecordId execute(@Nonnull WriteOperation writeOperation) throws IOException {
         SegmentBufferWriter writer = borrowWriter(currentThread());
         try {
             return writeOperation.execute(writer);
@@ -191,7 +192,7 @@ public class SegmentBufferWriterPool implements WriteOperationHandler {
             if (writer == null) {
                 writer = new SegmentBufferWriter(
                         store,
-                        tracker,
+                        tracker.getSegmentCounter(),
                         reader,
                         getWriterId(wid),
                         gcGeneration.get()
@@ -200,7 +201,7 @@ public class SegmentBufferWriterPool implements WriteOperationHandler {
                 disposed.add(writer);
                 writer = new SegmentBufferWriter(
                         store,
-                        tracker,
+                        tracker.getSegmentCounter(),
                         reader,
                         getWriterId(wid),
                         gcGeneration.get()

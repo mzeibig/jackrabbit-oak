@@ -28,7 +28,6 @@ import java.util.TreeSet;
 import javax.annotation.Nonnull;
 
 import com.google.common.base.Predicate;
-import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
 
@@ -54,9 +53,11 @@ import com.google.common.collect.Sets;
 import static com.google.common.collect.ImmutableList.copyOf;
 import static org.apache.jackrabbit.oak.plugins.document.Collection.NODES;
 import static org.apache.jackrabbit.oak.plugins.document.MongoBlobGCTest.randomStream;
+import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.DOC_SIZE_THRESHOLD;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.NUM_REVS_THRESHOLD;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.PREV_SPLIT_FACTOR;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.SplitDocType;
+import static org.apache.jackrabbit.oak.plugins.document.TestUtils.NO_BINARY;
 import static org.apache.jackrabbit.oak.plugins.document.UpdateOp.Operation.Type.REMOVE_MAP_ENTRY;
 import static org.apache.jackrabbit.oak.plugins.document.UpdateOp.Operation.Type.SET_MAP_ENTRY;
 import static org.apache.jackrabbit.oak.plugins.memory.BinaryPropertyState.binaryProperty;
@@ -510,7 +511,7 @@ public class DocumentSplitTest extends BaseDocumentMKTest {
 
         UpdateOp op = new UpdateOp(id, false);
         // create some baggage from another cluster node
-        for (int i = 0; i < 1000; i++) {
+        for (int i = 0; i < 4000; i++) {
             Revision r = Revision.newRevision(2);
             op.setMapEntry("prop", r, "some long test value with many characters");
             NodeDocument.setRevision(op, r, "c");
@@ -518,14 +519,8 @@ public class DocumentSplitTest extends BaseDocumentMKTest {
         store.findAndUpdate(NODES, op);
         NodeDocument doc = store.find(NODES, id);
         assertNotNull(doc);
-        assertTrue(doc.getMemory() > NodeDocument.DOC_SIZE_THRESHOLD);
+        assertTrue(doc.getMemory() > DOC_SIZE_THRESHOLD);
 
-        // these will be considered for a split
-        for (int i = 0; i < NUM_REVS_THRESHOLD / 2; i++) {
-            Revision r = Revision.newRevision(clusterId);
-            op.setMapEntry("prop", r, "value");
-            NodeDocument.setRevision(op, r, "c");
-        }
         // some fake previous doc references to trigger UpdateOp
         // for an intermediate document
         TreeSet<Revision> prev = Sets.newTreeSet(StableRevisionComparator.INSTANCE);
@@ -541,7 +536,7 @@ public class DocumentSplitTest extends BaseDocumentMKTest {
         assertNotNull(doc);
         List<UpdateOp> splitOps = Lists.newArrayList(doc.split(
                 mk.getNodeStore(), mk.getNodeStore().getHeadRevision(),
-                Predicates.<String>alwaysFalse()));
+                NO_BINARY));
         assertEquals(2, splitOps.size());
         // first update op is for the new intermediate doc
         op = splitOps.get(0);
@@ -598,7 +593,7 @@ public class DocumentSplitTest extends BaseDocumentMKTest {
         // the second most recent revision
         List<UpdateOp> splitOps = Lists.newArrayList(doc.split(
                 mk.getNodeStore(), mk.getNodeStore().getHeadRevision(),
-                Predicates.<String>alwaysFalse()));
+                NO_BINARY));
         assertEquals(2, splitOps.size());
         String prevId = Utils.getPreviousIdFor("/test", revs.get(revs.size() - 2), 0);
         assertEquals(prevId, splitOps.get(0).getId());
@@ -676,7 +671,7 @@ public class DocumentSplitTest extends BaseDocumentMKTest {
         doc.put(NodeDocument.SD_TYPE, NodeDocument.SplitDocType.DEFAULT.type);
         RevisionVector head = mk.getNodeStore().getHeadRevision();
         SplitOperations.forDocument(doc, DummyRevisionContext.INSTANCE, head,
-                Predicates.<String>alwaysFalse(), NUM_REVS_THRESHOLD);
+                NO_BINARY, NUM_REVS_THRESHOLD);
     }
 
     @Test
@@ -859,7 +854,7 @@ public class DocumentSplitTest extends BaseDocumentMKTest {
                 RevisionVector head = ns.getHeadRevision();
                 NodeDocument doc = store.find(NODES, id);
                 List<UpdateOp> ops = SplitOperations.forDocument(doc, rc, head,
-                        Predicates.<String>alwaysFalse(), NUM_REVS_THRESHOLD);
+                        NO_BINARY, NUM_REVS_THRESHOLD);
                 Set<Revision> removed = Sets.newHashSet();
                 Set<Revision> added = Sets.newHashSet();
                 for (UpdateOp op : ops) {
@@ -905,7 +900,8 @@ public class DocumentSplitTest extends BaseDocumentMKTest {
         builder.child("foo");
         merge(ns, builder);
 
-        PropertyState binary = binaryProperty("p", "value".getBytes());
+        // use more than 4k of binary data (OAK-5205)
+        PropertyState binary = binaryProperty("p", randomBytes(5 * 1024));
 
         for (int i = 0; i < 10; i++) {
             builder = ns.getRoot().builder();
@@ -919,6 +915,87 @@ public class DocumentSplitTest extends BaseDocumentMKTest {
         List<NodeDocument> prevDocs = copyOf(foo.getAllPreviousDocs());
         // all but most recent value are moved to individual previous docs
         assertEquals(9, prevDocs.size());
+    }
+
+    @Test
+    public void noBinarySplitWhenRemoved() throws Exception {
+        DocumentStore store = mk.getDocumentStore();
+        DocumentNodeStore ns = mk.getNodeStore();
+        NodeBuilder builder = ns.getRoot().builder();
+        // use more than 4k of binary data (OAK-5205)
+        PropertyState binary = binaryProperty("p", randomBytes(5 * 1024));
+        builder.child("foo").setProperty(binary);
+        merge(ns, builder);
+
+        builder = ns.getRoot().builder();
+        builder.child("foo").remove();
+        merge(ns, builder);
+        ns.runBackgroundOperations();
+
+        // must not create split document in this case. See OAK-5010
+        NodeDocument foo = store.find(NODES, Utils.getIdFromPath("/foo"));
+        assertNotNull(foo);
+        assertEquals(0, foo.getPreviousRanges().size());
+
+        // re-create it
+        builder = ns.getRoot().builder();
+        builder.child("foo");
+        merge(ns, builder);
+        ns.runBackgroundOperations();
+
+        // now the old binary value must be moved to a previous document
+        foo = store.find(NODES, Utils.getIdFromPath("/foo"));
+        assertNotNull(foo);
+        List<NodeDocument> prevDocs = copyOf(foo.getAllPreviousDocs());
+        assertEquals(1, prevDocs.size());
+    }
+
+    // OAK-5205
+    @Test
+    public void noSplitForSmallBinary() throws Exception {
+        DocumentStore store = mk.getDocumentStore();
+        DocumentNodeStore ns = mk.getNodeStore();
+        NodeBuilder builder = ns.getRoot().builder();
+        builder.child("foo");
+        merge(ns, builder);
+
+        for (int i = 0; i < 10; i++) {
+            builder = ns.getRoot().builder();
+            builder.child("foo").setProperty(
+                    binaryProperty("p", ("value" + i).getBytes()));
+            merge(ns, builder);
+            ns.runBackgroundOperations();
+        }
+
+        NodeDocument foo = store.find(NODES, Utils.getIdFromPath("/foo"));
+        assertNotNull(foo);
+        List<NodeDocument> prevDocs = copyOf(foo.getAllPreviousDocs());
+        // must not create split documents for small binaries less 4k
+        assertEquals(0, prevDocs.size());
+    }
+
+    @Test
+    public void nonSplittableBigDocument() throws Exception {
+        DocumentStore store = mk.getDocumentStore();
+        DocumentNodeStore ns = mk.getNodeStore();
+        NodeBuilder builder = ns.getRoot().builder();
+        builder.child("foo");
+        merge(ns, builder);
+
+        String id = Utils.getIdFromPath("/foo");
+        int num = 0;
+        while (store.find(NODES, id).getMemory() < DOC_SIZE_THRESHOLD) {
+            builder = ns.getRoot().builder();
+            for (int i = 0; i < 50; i++) {
+                builder.child("foo").setProperty("p" + num++,
+                        "some value as payload for the document");
+            }
+            merge(ns, builder);
+        }
+
+        Iterable<UpdateOp> splitOps = store.find(NODES, id)
+                .split(ns, ns.getHeadRevision(), NO_BINARY);
+        assertEquals(0, Iterables.size(splitOps));
     }
 
     private static class TestRevisionContext implements RevisionContext {
@@ -974,5 +1051,12 @@ public class DocumentSplitTest extends BaseDocumentMKTest {
                 mks.get(i).runBackgroundOperations();
             }
         }
+    }
+
+    private byte[] randomBytes(int num) {
+        Random random = new Random(42);
+        byte[] data = new byte[num];
+        random.nextBytes(data);
+        return data;
     }
 }

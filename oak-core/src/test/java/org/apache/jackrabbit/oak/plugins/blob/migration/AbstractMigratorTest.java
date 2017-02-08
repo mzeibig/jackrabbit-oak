@@ -19,11 +19,13 @@
 
 package org.apache.jackrabbit.oak.plugins.blob.migration;
 
-import static junit.framework.Assert.assertEquals;
+import static org.junit.Assert.assertEquals;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.FileSystems;
+import java.nio.file.Path;
 import java.util.Random;
 
 import org.apache.commons.io.FileUtils;
@@ -42,9 +44,8 @@ import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
-
-import com.google.common.io.Files;
 
 public abstract class AbstractMigratorTest {
 
@@ -62,7 +63,8 @@ public abstract class AbstractMigratorTest {
 
     @Before
     public void setup() throws CommitFailedException, IllegalArgumentException, IOException {
-        repository = Files.createTempDir();
+        Path target = FileSystems.getDefault().getPath("target");
+        repository = java.nio.file.Files.createTempDirectory(target, "migrate-").toFile();
         BlobStore oldBlobStore = createOldBlobStore(repository);
         NodeStore originalNodeStore = createNodeStore(oldBlobStore, repository);
         createContent(originalNodeStore);
@@ -85,7 +87,7 @@ public abstract class AbstractMigratorTest {
     @After
     public void teardown() throws IOException {
         closeNodeStore();
-        FileUtils.deleteDirectory(repository);
+        FileUtils.deleteQuietly(repository);
     }
 
     @Test

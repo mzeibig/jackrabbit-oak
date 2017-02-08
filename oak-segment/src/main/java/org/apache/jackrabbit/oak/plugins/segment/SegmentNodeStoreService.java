@@ -82,6 +82,7 @@ import org.apache.jackrabbit.oak.plugins.segment.file.FileStore.Builder;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStoreGCMonitor;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStoreStatsMBean;
 import org.apache.jackrabbit.oak.plugins.segment.file.GCMonitorMBean;
+import org.apache.jackrabbit.oak.plugins.segment.file.InvalidFileStoreVersionException;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
 import org.apache.jackrabbit.oak.spi.commit.Observable;
@@ -117,9 +118,11 @@ import org.slf4j.LoggerFactory;
                 "should be done via file system based config file and this view should ONLY be used to determine which " +
                 "options are supported"
 )
+@Deprecated
 public class SegmentNodeStoreService extends ProxyNodeStore
         implements Observable, SegmentStoreProvider {
 
+    @Deprecated
     public static final String NAME = "name";
 
     @Property(
@@ -127,12 +130,14 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             description="Directory location used to store the segment tar files. If not specified then looks " +
                     "for framework property 'repository.home' otherwise use a subdirectory with name 'tarmk'"
     )
+    @Deprecated
     public static final String DIRECTORY = "repository.home";
 
     @Property(
             label = "Mode",
             description="TarMK mode (64 for memory mapping, 32 for normal file access)"
     )
+    @Deprecated
     public static final String MODE = "tarmk.mode";
 
     @Property(
@@ -140,6 +145,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             label = "Maximum Tar File Size (MB)",
             description = "TarMK maximum file size (MB)"
     )
+    @Deprecated
     public static final String SIZE = "tarmk.size";
 
     @Property(
@@ -147,6 +153,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             label = "Cache size (MB)",
             description = "Cache size for storing most recently used Segments"
     )
+    @Deprecated
     public static final String CACHE = "cache";
 
     @Property(
@@ -154,6 +161,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             label = "Clone Binaries",
             description = "Clone the binary segments while performing compaction"
     )
+    @Deprecated
     public static final String COMPACTION_CLONE_BINARIES = "compaction.cloneBinaries";
 
     @Property(options = {
@@ -168,6 +176,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
                     "certain age are considered valid (compaction.cleanup.timestamp), " +
                     "3. CLEAN_ALL: None of the in memory references are considered valid"
     )
+    @Deprecated
     public static final String COMPACTION_CLEANUP = "compaction.cleanup";
 
     @Property(
@@ -176,6 +185,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             description = "Time interval in ms beyond which in memory segment references would be ignored " +
                     "while performing cleanup"
     )
+    @Deprecated
     public static final String COMPACTION_CLEANUP_TIMESTAMP = "compaction.cleanup.timestamp";
 
     @Property(
@@ -183,6 +193,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             label = "Memory Multiplier",
             description = "TarMK compaction available memory multiplier needed to run compaction"
     )
+    @Deprecated
     public static final String COMPACTION_MEMORY_THRESHOLD = "compaction.memoryThreshold";
 
     @Property(
@@ -191,6 +202,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             description = "TarMK compaction gain threshold. The gain estimation prevents compaction from running " +
                     "if the provided threshold is not met. Value represents a percentage so an input beween 0 and 100 is expected."
     )
+    @Deprecated
     public static final String COMPACTION_GAIN_THRESHOLD = "compaction.gainThreshold";
 
     @Property(
@@ -198,6 +210,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             label = "Pause Compaction",
             description = "When enabled compaction would not be performed"
     )
+    @Deprecated
     public static final String PAUSE_COMPACTION = "pauseCompaction";
 
     @Property(
@@ -206,6 +219,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             description = "Number of tries to compact concurrent commits on top of already " +
                     "compacted commits"
     )
+    @Deprecated
     public static final String COMPACTION_RETRY_COUNT = "compaction.retryCount";
 
     @Property(
@@ -215,8 +229,10 @@ public class SegmentNodeStoreService extends ProxyNodeStore
                     " compacted commits after the maximum number of retries has been reached. " +
                     "Force committing tries to exclusively write lock the node store."
     )
+    @Deprecated
     public static final String COMPACTION_FORCE_AFTER_FAIL = "compaction.forceAfterFail";
 
+    @Deprecated
     public static final int COMPACTION_LOCK_WAIT_TIME_DEFAULT = 60;
     @Property(
             intValue = COMPACTION_LOCK_WAIT_TIME_DEFAULT,
@@ -224,6 +240,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             description = "Number of seconds to wait for the lock for committing compacted changes " +
                     "respectively to wait for the exclusive write lock for force committing."
     )
+    @Deprecated
     public static final String COMPACTION_LOCK_WAIT_TIME = "compaction.lockWaitTime";
 
     @Property(
@@ -232,6 +249,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             description = "When enabled the compaction map would be persisted instead of being " +
                     "held in memory"
     )
+    @Deprecated
     public static final String PERSIST_COMPACTION_MAP = "persistCompactionMap";
 
     @Property(
@@ -239,6 +257,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             label = "Standby Mode",
             description = "Flag indicating that this component will not register as a NodeStore but just as a NodeStoreProvider"
     )
+    @Deprecated
     public static final String STANDBY = "standby";
 
     @Property(
@@ -246,6 +265,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             label = "Secondary Store Mode",
             description = "Flag indicating that this component will not register as a NodeStore but just as a SecondaryNodeStoreProvider"
     )
+    @Deprecated
     public static final String SECONDARY_STORE = "secondary";
 
     @Property(boolValue = false,
@@ -253,6 +273,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             description = "Boolean value indicating that a custom BlobStore is to be used. " +
                     "By default large binary content would be stored within segment tar files"
     )
+    @Deprecated
     public static final String CUSTOM_BLOB_STORE = "customBlobStore";
 
     private final Logger log = LoggerFactory.getLogger(getClass());
@@ -306,6 +327,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             "example as per default only those blobs which have been created 24 hrs ago will be " +
             "considered for GC"
     )
+    @Deprecated
     public static final String PROP_BLOB_GC_MAX_AGE = "blobGcMaxAgeInSecs";
 
     /**
@@ -315,8 +337,11 @@ public class SegmentNodeStoreService extends ProxyNodeStore
     @Property (longValue = DEFAULT_BLOB_SNAPSHOT_INTERVAL,
         label = "Blob tracking snapshot interval (in secs)",
         description = "This is the default interval in which the snapshots of locally tracked blob ids will"
-            + "be taken and synchronized with the blob store"
+            + "be taken and synchronized with the blob store. This should be configured to be less than the "
+            + "frequency of blob GC so that deletions during blob GC can be accounted for "
+            + "in the next GC execution."
     )
+    @Deprecated
     public static final String PROP_BLOB_SNAPSHOT_INTERVAL = "blobTrackSnapshotIntervalInSecs";
 
     @Override
@@ -326,6 +351,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
     }
 
     @Activate
+    @Deprecated
     public void activate(ComponentContext context) throws IOException {
         this.context = context;
         //In secondaryNodeStore mode customBlobStore is always enabled
@@ -349,6 +375,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
     }
 
     @Deactivate
+    @Deprecated
     public void deactivate() {
         unregisterNodeStore();
 
@@ -435,7 +462,12 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             builder.withBlobStore(blobStore);
         }
 
-        store = builder.build();
+        try {
+            store = builder.build();
+        } catch (InvalidFileStoreVersionException e) {
+            log.error("The segment store data is not compatible with the current version. Please use oak-segment-tar or a different version of oak-segment.");
+            return false;
+        }
 
         // Create a compaction strategy
 
@@ -496,10 +528,16 @@ public class SegmentNodeStoreService extends ProxyNodeStore
 
         };
 
+        Runnable cancelGarbageCollection = new Runnable() {
+            @Override
+            public void run() {
+                throw new UnsupportedOperationException("Cancelling revision garbage collection is not supported");
+            }
+        };
         revisionGCRegistration = registerMBean(
                 whiteboard,
                 RevisionGCMBean.class,
-                new RevisionGC(triggerGarbageCollection, executor),
+                new RevisionGC(triggerGarbageCollection, cancelGarbageCollection, executor),
                 RevisionGCMBean.TYPE,
                 "Segment node store revision garbage collection"
         );
@@ -805,6 +843,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
      * SegmentNodeStoreService, to get the SegmentStore, like the failover
      */
     @Override
+    @Deprecated
     public SegmentStore getSegmentStore() {
         return store;
     }
@@ -812,6 +851,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
     //------------------------------------------------------------< Observable >---
 
     @Override
+    @Deprecated
     public Closeable addObserver(Observer observer) {
         return getNodeStore().addObserver(observer);
     }
@@ -819,6 +859,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
     //------------------------------------------------------------< Object >--
 
     @Override
+    @Deprecated
     public String toString() {
         return name + ": " + segmentNodeStore;
     }

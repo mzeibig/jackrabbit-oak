@@ -22,26 +22,45 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 
+import org.apache.jackrabbit.oak.spi.blob.BlobOptions;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 
 /**
  * Utility BlobStore implementation to be used in tooling that can work with a
  * FileStore without the need of the DataStore being present locally
  */
+@Deprecated
 public class BasicReadOnlyBlobStore implements BlobStore {
 
     @Override
+    @Deprecated
     public String writeBlob(InputStream in) throws IOException {
         throw new UnsupportedOperationException();
     }
 
+    /**
+     * Ignores the options provided and delegates to {@link #writeBlob(InputStream)}.
+     *
+     * @param in the input stream to write
+     * @param options the options to use
+     * @return
+     * @throws IOException
+     */
     @Override
+    @Deprecated
+    public String writeBlob(InputStream in, BlobOptions options) throws IOException {
+        return writeBlob(in);
+    }
+
+    @Override
+    @Deprecated
     public int readBlob(String blobId, long pos, byte[] buff, int off,
             int length) throws IOException {
         throw new UnsupportedOperationException();
     }
 
     @Override
+    @Deprecated
     public long getBlobLength(String blobId) throws IOException {
         // best effort length extraction
         int indexOfSep = blobId.lastIndexOf("#");
@@ -52,16 +71,19 @@ public class BasicReadOnlyBlobStore implements BlobStore {
     }
 
     @Override
+    @Deprecated
     public InputStream getInputStream(String blobId) throws IOException {
         return new ByteArrayInputStream(new byte[0]);
     }
 
     @Override
+    @Deprecated
     public String getBlobId(String reference) {
         return reference;
     }
 
     @Override
+    @Deprecated
     public String getReference(String blobId) {
         return blobId;
     }

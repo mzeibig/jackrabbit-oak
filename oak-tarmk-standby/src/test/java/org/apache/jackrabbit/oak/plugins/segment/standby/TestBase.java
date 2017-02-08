@@ -18,7 +18,11 @@
  */
 package org.apache.jackrabbit.oak.plugins.segment.standby;
 
+import static org.apache.jackrabbit.oak.commons.CIHelper.jenkins;
+import static org.apache.jackrabbit.oak.commons.FixturesHelper.Fixture.SEGMENT_TAR;
+import static org.apache.jackrabbit.oak.commons.FixturesHelper.getFixtures;
 import static org.apache.jackrabbit.oak.plugins.segment.SegmentTestUtils.createTmpTargetDir;
+import static org.junit.Assume.assumeFalse;
 import static org.junit.Assume.assumeTrue;
 
 import java.io.File;
@@ -57,6 +61,11 @@ public class TestBase {
     File directoryC2;
     FileStore storeC2;
 
+    @BeforeClass
+    public static void assumeIsNotJenkins() {
+        assumeFalse(jenkins());
+    }
+
     /*
      Java 6 on Windows doesn't support dual IP stacks, so we will skip our IPv6
      tests.
@@ -66,10 +75,10 @@ public class TestBase {
     @BeforeClass
     public static void assumptions() {
         assumeTrue(!CIHelper.travis());
-        assumeTrue(FIXTURES.contains(Fixture.SEGMENT_MK));
+        assumeTrue(FIXTURES.contains(Fixture.SEGMENT_MK) || getFixtures().contains(SEGMENT_TAR));
     }
 
-    public void setUpServerAndClient() throws IOException {
+    public void setUpServerAndClient() throws Exception {
         // server
         directoryS = createTmpTargetDir(getClass().getSimpleName()+"-Server");
         storeS = setupPrimary(directoryS);
@@ -79,7 +88,7 @@ public class TestBase {
         storeC = setupSecondary(directoryC);
     }
 
-    private static FileStore newFileStore(File directory) throws IOException {
+    private static FileStore newFileStore(File directory) throws Exception {
         return FileStore.builder(directory)
             .withMaxFileSize(1)
             .withMemoryMapping(false)
@@ -87,7 +96,7 @@ public class TestBase {
             .build();
     }
 
-    protected FileStore setupPrimary(File directory) throws IOException {
+    protected FileStore setupPrimary(File directory) throws Exception {
         return newFileStore(directory);
     }
 
@@ -95,7 +104,7 @@ public class TestBase {
         return storeS;
     }
 
-    protected FileStore setupSecondary(File directory) throws IOException {
+    protected FileStore setupSecondary(File directory) throws Exception {
         return newFileStore(directoryC);
     }
 

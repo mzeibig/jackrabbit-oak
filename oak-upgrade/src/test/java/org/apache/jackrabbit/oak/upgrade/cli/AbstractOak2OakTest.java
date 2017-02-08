@@ -20,18 +20,26 @@ import static java.util.Collections.singletonMap;
 import static junit.framework.Assert.assertFalse;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 
+import javax.annotation.Nullable;
 import javax.jcr.Node;
 import javax.jcr.Property;
 import javax.jcr.RepositoryException;
 import javax.jcr.Session;
 import javax.jcr.SimpleCredentials;
+import javax.jcr.Value;
 
+import com.google.common.base.Function;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Lists;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.commons.IOUtils;
@@ -46,7 +54,9 @@ import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.upgrade.RepositorySidegrade;
 import org.apache.jackrabbit.oak.upgrade.cli.container.NodeStoreContainer;
+import org.apache.jackrabbit.oak.upgrade.cli.container.SegmentNodeStoreContainer;
 import org.apache.jackrabbit.oak.upgrade.cli.container.SegmentTarNodeStoreContainer;
+import org.apache.jackrabbit.oak.upgrade.cli.parser.CliArgumentException;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -60,7 +70,7 @@ public abstract class AbstractOak2OakTest {
 
     private static final Logger log = LoggerFactory.getLogger(AbstractOak2OakTest.class);
 
-    protected static SegmentTarNodeStoreContainer testContent;
+    protected static SegmentNodeStoreContainer testContent;
 
     private NodeStore destination;
 
@@ -82,7 +92,7 @@ public abstract class AbstractOak2OakTest {
         if (!tempDir.isDirectory()) {
             Util.unzip(AbstractOak2OakTest.class.getResourceAsStream("/segmentstore.zip"), tempDir);
         }
-        testContent = new SegmentTarNodeStoreContainer(tempDir);
+        testContent = new SegmentNodeStoreContainer(tempDir);
     }
 
     @Before
@@ -109,8 +119,12 @@ public abstract class AbstractOak2OakTest {
     @After
     public void clean() throws IOException {
         try {
-            session.logout();
-            repository.shutdown();
+            if (session != null) {
+                session.logout();
+            }
+            if (repository != null) {
+                repository.shutdown();
+            }
         } finally {
             IOUtils.closeQuietly(getDestinationContainer());
             getDestinationContainer().clean();
@@ -138,7 +152,7 @@ public abstract class AbstractOak2OakTest {
     }
 
     @Test
-    public void validateMigration() throws RepositoryException, IOException {
+    public void validateMigration() throws RepositoryException, IOException, CliArgumentException {
         verifyContent(session);
         verifyBlob(session);
         if (supportsCheckpointMigration()) {
@@ -161,7 +175,20 @@ public abstract class AbstractOak2OakTest {
 
         Node nodeType = session.getNode("/jcr:system/jcr:nodeTypes/sling:OrderedFolder");
         assertEquals("rep:NodeType", nodeType.getProperty("jcr:primaryType").getString());
-        assertEquals("jcr:mixinTypes", nodeType.getProperty("rep:protectedProperties").getValues()[0].getString());
+
+        List<String> values = Lists.transform(Arrays.asList(nodeType.getProperty("rep:protectedProperties").getValues()), new Function<Value, String>() {
+            @Nullable
+            @Override
+            public String apply(@Nullable Value input) {
+                try {
+                    return input.getString();
+                } catch (RepositoryException e) {
+                    return null;
+                }
+            }
+        });
+        assertTrue(values.contains("jcr:mixinTypes"));
+        assertTrue(values.contains("jcr:primaryType"));
         assertEquals("false", nodeType.getProperty("jcr:isAbstract").getString());
     }
 

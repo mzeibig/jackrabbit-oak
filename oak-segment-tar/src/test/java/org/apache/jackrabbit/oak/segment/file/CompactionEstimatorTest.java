@@ -27,7 +27,6 @@ import java.io.File;
 import java.io.IOException;
 import java.util.Random;
 
-import com.google.common.base.Suppliers;
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStore;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
@@ -80,9 +79,8 @@ public class CompactionEstimatorTest {
 
         fileStore.flush();
         try {
-            // should be at 66%
-            assertTrue(fileStore.estimateCompactionGain(Suppliers.ofInstance(false))
-                    .estimateCompactionGain() > 60);
+            GCEstimation est = fileStore.estimateCompactionGain();
+            assertTrue(est.gcNeeded());
         } finally {
             fileStore.close();
         }

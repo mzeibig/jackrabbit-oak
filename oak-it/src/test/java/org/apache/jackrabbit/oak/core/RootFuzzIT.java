@@ -59,9 +59,9 @@ import org.slf4j.LoggerFactory;
 public class RootFuzzIT {
     static final Logger log = LoggerFactory.getLogger(RootFuzzIT.class);
 
-    @Parameters
+    @Parameters(name="{0}")
     public static Collection<Object[]> fixtures() {
-        return NodeStoreFixtures.asJunitParameters(EnumSet.of(Fixture.DOCUMENT_NS, Fixture.SEGMENT_MK));
+        return NodeStoreFixtures.asJunitParameters(EnumSet.of(Fixture.DOCUMENT_NS, Fixture.SEGMENT_TAR));
     }
 
     private static final int OP_COUNT = 5000;

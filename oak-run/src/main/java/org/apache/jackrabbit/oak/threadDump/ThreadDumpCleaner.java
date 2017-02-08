@@ -50,6 +50,8 @@ public class ThreadDumpCleaner {
 
         "   Locked ownable synchronizers:(?s).*?\n\n",
 
+        "   Locked synchronizers:(?s).*?\n\n",
+
         "\".*?\".*?\n   java.lang.Thread.State: (TIMED_)?WAITING(?s).*?\n\n",
 
         "\".*?\".*?\n   java.lang.Thread.State:.*\n\t" +
@@ -91,6 +93,9 @@ public class ThreadDumpCleaner {
         "\".*?\".*?\n   java.lang.Thread.State:.*\n\t" +
                 "at java.net.PlainSocketImpl.socketAvailable(?s).*?\n\n",
 
+        "\".*?\".*?\n   java.lang.Thread.State:.*\n\t" +
+                "at java.net.PlainSocketImpl.socketConnect(?s).*?\n\n",
+
         "<EndOfDump>\n\n",
 
     };
@@ -131,14 +136,25 @@ public class ThreadDumpCleaner {
 
     private static void process(LineNumberReader reader, PrintWriter writer) throws IOException {
         StringBuilder buff = new StringBuilder();
+        int activeThreadCount = 0;
         while (true) {
             String line = reader.readLine();
             if (line == null) {
                 break;
             }
+            if (line.startsWith("Full thread dump") || line.startsWith("Full Java thread dump")) {
+                if (activeThreadCount > 0) {
+                    System.out.println("Active threads: " + activeThreadCount);
+                }
+                activeThreadCount = 0;
+            }
             buff.append(line).append('\n');
             if (line.trim().length() == 0) {
-                writer.print(filter(buff.toString()));
+                String filtered = filter(buff.toString());
+                if (filtered.trim().length() > 10) {
+                    activeThreadCount++;
+                }
+                writer.print(filtered);
                 buff = new StringBuilder();
             }
         }

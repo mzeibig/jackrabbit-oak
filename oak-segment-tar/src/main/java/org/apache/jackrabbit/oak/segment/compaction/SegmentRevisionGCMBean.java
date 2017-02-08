@@ -19,19 +19,39 @@
 
 package org.apache.jackrabbit.oak.segment.compaction;
 
-import org.apache.jackrabbit.oak.commons.jmx.AnnotatedStandardMBean;
+import static com.google.common.base.Preconditions.checkNotNull;
 
-// FIXME OAK-4617: Align SegmentRevisionGC MBean with new generation based GC
+import javax.annotation.CheckForNull;
+import javax.annotation.Nonnull;
+
+import org.apache.jackrabbit.oak.commons.jmx.AnnotatedStandardMBean;
+import org.apache.jackrabbit.oak.segment.file.FileStore;
+import org.apache.jackrabbit.oak.segment.file.FileStoreGCMonitor;
+
 public class SegmentRevisionGCMBean
         extends AnnotatedStandardMBean
         implements SegmentRevisionGC {
 
+    @Nonnull
+    private final FileStore fileStore;
+
+    @Nonnull
     private final SegmentGCOptions gcOptions;
 
-    public SegmentRevisionGCMBean(SegmentGCOptions gcOptions) {
+    @Nonnull
+    private final FileStoreGCMonitor fileStoreGCMonitor;
+
+    public SegmentRevisionGCMBean(
+            @Nonnull FileStore fileStore,
+            @Nonnull SegmentGCOptions gcOptions,
+            @Nonnull FileStoreGCMonitor fileStoreGCMonitor) {
         super(SegmentRevisionGC.class);
-        this.gcOptions = gcOptions;
+        this.fileStore = checkNotNull(fileStore);
+        this.gcOptions = checkNotNull(gcOptions);
+        this.fileStoreGCMonitor = checkNotNull(fileStoreGCMonitor);
     }
+
+    //------------------------------------------------------------< SegmentRevisionGC >---
 
     @Override
     public boolean isPausedCompaction() {
@@ -41,26 +61,6 @@ public class SegmentRevisionGCMBean
     @Override
     public void setPausedCompaction(boolean paused) {
         gcOptions.setPaused(paused);
-    }
-
-    @Override
-    public int getGainThreshold() {
-        return gcOptions.getGainThreshold();
-    }
-
-    @Override
-    public void setGainThreshold(int gainThreshold) {
-        gcOptions.setGainThreshold(gainThreshold);
-    }
-
-    @Override
-    public int getMemoryThreshold() {
-        return gcOptions.getMemoryThreshold();
-    }
-
-    @Override
-    public void setMemoryThreshold(int memoryThreshold) {
-        gcOptions.setMemoryThreshold(memoryThreshold);
     }
 
     @Override
@@ -74,23 +74,13 @@ public class SegmentRevisionGCMBean
     }
 
     @Override
-    public boolean getForceAfterFail() {
-        return gcOptions.getForceAfterFail();
+    public int getForceTimeout() {
+        return gcOptions.getForceTimeout();
     }
 
     @Override
-    public void setForceAfterFail(boolean forceAfterFail) {
-        gcOptions.setForceAfterFail(forceAfterFail);
-    }
-
-    @Override
-    public int getLockWaitTime() {
-        return gcOptions.getLockWaitTime();
-    }
-
-    @Override
-    public void setLockWaitTime(int lockWaitTime) {
-        gcOptions.setLockWaitTime(lockWaitTime);
+    public void setForceTimeout(int timeout) {
+        gcOptions.setForceTimeout(timeout);
     }
 
     @Override
@@ -101,5 +91,113 @@ public class SegmentRevisionGCMBean
     @Override
     public void setRetainedGenerations(int retainedGenerations) {
         gcOptions.setRetainedGenerations(retainedGenerations);
+    }
+
+    @Override
+    public long getGcSizeDeltaEstimation() {
+        return gcOptions.getGcSizeDeltaEstimation();
+    }
+
+    @Override
+    public void setGcSizeDeltaEstimation(long gcSizeDeltaEstimation) {
+        gcOptions.setGcSizeDeltaEstimation(gcSizeDeltaEstimation);
+    }
+
+    @Override
+    public boolean isEstimationDisabled() {
+        return gcOptions.isEstimationDisabled();
+    }
+
+    @Override
+    public void setEstimationDisabled(boolean disabled)  {
+        gcOptions.setEstimationDisabled(disabled);
+    }
+
+    @Override
+    public void startRevisionGC() {
+        fileStore.getGCRunner().run();
+    }
+
+    @Override
+    public void cancelRevisionGC() {
+        fileStore.cancelGC();
+    }
+
+    @Override
+    public long getLastCompaction() {
+        return fileStoreGCMonitor.getLastCompaction();
+    }
+
+    @Override
+    public long getLastCleanup() {
+        return fileStoreGCMonitor.getLastCleanup();
+    }
+
+    @Override
+    public long getLastRepositorySize() {
+        return fileStoreGCMonitor.getLastRepositorySize();
+    }
+
+    @Override
+    public long getLastReclaimedSize() {
+        return fileStoreGCMonitor.getLastReclaimedSize();
+    }
+
+    @CheckForNull
+    @Override
+    public String getLastError() {
+        return fileStoreGCMonitor.getLastError();
+    }
+    
+    @Nonnull
+    @Override
+    public String getLastLogMessage() {
+        return fileStoreGCMonitor.getLastLogMessage();
+    }
+    
+    @Nonnull
+    @Override
+    public String getStatus() {
+        return fileStoreGCMonitor.getStatus();
+    }
+
+    @Override
+    public int getMemoryThreshold() {
+        return gcOptions.getMemoryThreshold();
+    }
+
+    @Override
+    public void setMemoryThreshold(int memoryThreshold) {
+        gcOptions.setMemoryThreshold(memoryThreshold);
+    }
+
+    @Override
+    public boolean isRevisionGCRunning() {
+        return gcOptions.getGCNodeWriteMonitor().isCompactionRunning();
+    }
+
+    @Override
+    public long getCompactedNodes() {
+        return gcOptions.getGCNodeWriteMonitor().getCompactedNodes();
+    }
+
+    @Override
+    public long getEstimatedCompactableNodes() {
+        return gcOptions.getGCNodeWriteMonitor().getEstimatedTotal();
+    }
+
+    @Override
+    public int getEstimatedRevisionGCCompletion() {
+        return gcOptions.getGCNodeWriteMonitor().getEstimatedPercentage();
+    }
+
+    @Override
+    public long getRevisionGCProgressLog() {
+        return gcOptions.getGCNodeWriteMonitor().getGcProgressLog();
+    }
+
+    @Override
+    public void setRevisionGCProgressLog(long gcProgressLog) {
+        gcOptions.getGCNodeWriteMonitor().setGcProgressLog(gcProgressLog);
     }
 }

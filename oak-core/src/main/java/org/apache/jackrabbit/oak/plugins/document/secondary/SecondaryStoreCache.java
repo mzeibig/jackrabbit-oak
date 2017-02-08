@@ -39,7 +39,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 
-class SecondaryStoreCache implements DocumentNodeStateCache, SecondaryStoreRootObserver {
+public class SecondaryStoreCache implements DocumentNodeStateCache, SecondaryStoreRootObserver {
     private final Logger log = LoggerFactory.getLogger(getClass());
     private static final AbstractDocumentNodeState[] EMPTY = new AbstractDocumentNodeState[0];
     private final NodeStore store;
@@ -114,6 +114,11 @@ class SecondaryStoreCache implements DocumentNodeStateCache, SecondaryStoreRootO
 
         knownMissed.mark();
         return null;
+    }
+
+    @Override
+    public boolean isCached(String path) {
+        return pathFilter.filter(path) == PathFilter.Result.INCLUDE;
     }
 
     @CheckForNull

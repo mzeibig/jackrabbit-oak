@@ -326,10 +326,16 @@ public class DefaultSyncContext implements SyncContext {
             log.info("won't remove local group with members: {}", id);
             status = SyncResult.Status.NOP;
         } else if (!keepMissing) {
-            authorizable.remove();
-            log.debug("removing authorizable '{}' that no longer exists on IDP {}", id, idp.getName());
+            if (config.user().getDisableMissing() && !authorizable.isGroup()) {
+                ((User) authorizable).disable("No longer exists on external identity provider '" + idp.getName() + "'");
+                log.debug("disabling user '{}' that no longer exists on IDP {}", id, idp.getName());
+                status = SyncResult.Status.DISABLE;
+            } else {
+                authorizable.remove();
+                log.debug("removing authorizable '{}' that no longer exists on IDP {}", id, idp.getName());
+                status = SyncResult.Status.DELETE;
+            }
             timer.mark("remove");
-            status = SyncResult.Status.DELETE;
         } else {
             status = SyncResult.Status.MISSING;
             log.info("external identity missing for {}, but purge == false.", id);
@@ -374,8 +380,10 @@ public class DefaultSyncContext implements SyncContext {
     @Nonnull
     protected User createUser(@Nonnull ExternalUser externalUser) throws RepositoryException {
         Principal principal = new PrincipalImpl(externalUser.getPrincipalName());
+        String authId = config.user().isApplyRFC7613UsernameCaseMapped() ?
+                        java.text.Normalizer.normalize(externalUser.getId().toLowerCase(), java.text.Normalizer.Form.NFKC) : externalUser.getId();
         User user = userManager.createUser(
-                externalUser.getId(),
+                authId,
                 null,
                 principal,
                 PathUtils.concatRelativePaths(config.user().getPathPrefix(), externalUser.getIntermediatePath())
@@ -420,8 +428,13 @@ public class DefaultSyncContext implements SyncContext {
 
     @Nonnull
     protected DefaultSyncResultImpl syncUser(@Nonnull ExternalUser external, @Nonnull User user) throws RepositoryException {
+        // make also sure the local user to be synced belongs to the same IDP. Note: 'external' has been verified before.
+        if (!isSameIDP(user)) {
+            return new DefaultSyncResultImpl(new DefaultSyncedIdentity(external.getId(), external.getExternalId(), false, -1), SyncResult.Status.FOREIGN);
+        }
+
         SyncResult.Status status;
-        // first check if user is expired
+        // check if user is expired
         if (!forceUserSync && !isExpired(user)) {
             status = SyncResult.Status.NOP;
         } else {
@@ -430,15 +443,25 @@ public class DefaultSyncContext implements SyncContext {
                 // synchronize external memberships
                 syncMembership(external, user, config.user().getMembershipNestingDepth());
             }
+            if (this.config.user().getDisableMissing() && user.isDisabled()) {
+                status = SyncResult.Status.ENABLE;
+                user.disable(null);
+            } else {
+                status = SyncResult.Status.UPDATE;
+            }
             // finally "touch" the sync property
             user.setProperty(REP_LAST_SYNCED, nowValue);
-            status = SyncResult.Status.UPDATE;
         }
         return new DefaultSyncResultImpl(createSyncedIdentity(user), status);
     }
 
     @Nonnull
     protected DefaultSyncResultImpl syncGroup(@Nonnull ExternalGroup external, @Nonnull Group group) throws RepositoryException {
+        // make also sure the local user to be synced belongs to the same IDP. Note: 'external' has been verified before.
+        if (!isSameIDP(group)) {
+            return new DefaultSyncResultImpl(new DefaultSyncedIdentity(external.getId(), external.getExternalId(), false, -1), SyncResult.Status.FOREIGN);
+        }
+
         SyncResult.Status status;
         // first check if group is expired
         if (!forceGroupSync && !isExpired(group)) {
@@ -724,8 +747,6 @@ public class DefaultSyncContext implements SyncContext {
     /**
      * Checks if the given authorizable was synced from the same IDP by comparing the IDP name of the
      * {@value #REP_EXTERNAL_ID} property.
-     *
-     * todo: allow multiple IDPs on 1 authorizable
      *
      * @param auth the authorizable.
      * @return {@code true} if same IDP.

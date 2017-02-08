@@ -96,11 +96,11 @@ class MapEntry extends AbstractChildNodeEntry
     //--------------------------------------------------------< Comparable >--
 
     @Override
-    public int compareTo(MapEntry that) {
+    public int compareTo(@Nonnull MapEntry that) {
         return ComparisonChain.start()
                 .compare(getHash() & HASH_MASK, that.getHash() & HASH_MASK)
                 .compare(name, that.name)
-                .compare(value, that.value)
+                .compare(value, that.value)  // FIXME OAK-5301: Possible null dereference in MapRecord
                 .result();
     }
 

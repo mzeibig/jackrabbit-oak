@@ -45,6 +45,7 @@ import org.apache.jackrabbit.oak.plugins.blob.datastore.DataStoreBlobStore;
 import org.apache.jackrabbit.oak.plugins.memory.AbstractBlob;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileBlob;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
+import org.apache.jackrabbit.oak.spi.blob.BlobOptions;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
@@ -159,7 +160,7 @@ public class ExternalBlobIT {
         }
     }
 
-    protected SegmentNodeStore getNodeStore(BlobStore blobStore) throws IOException {
+    protected SegmentNodeStore getNodeStore(BlobStore blobStore) throws Exception {
         if (nodeStore == null) {
             store = FileStore.builder(getWorkDir()).withBlobStore(blobStore).withMaxFileSize(256).withMemoryMapping(false).build();
             nodeStore = SegmentNodeStore.builder(store).build();
@@ -201,6 +202,11 @@ public class ExternalBlobIT {
         @Override
         public String writeBlob(InputStream in) throws IOException {
             throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public String writeBlob(InputStream in, BlobOptions options) throws IOException {
+            return writeBlob(in);
         }
 
         @Override

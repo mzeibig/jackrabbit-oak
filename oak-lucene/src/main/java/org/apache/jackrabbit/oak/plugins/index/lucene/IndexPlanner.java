@@ -50,6 +50,7 @@ import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Lists.newArrayListWithCapacity;
 import static com.google.common.collect.Maps.newHashMap;
 import static org.apache.jackrabbit.JcrConstants.JCR_SCORE;
+import static org.apache.jackrabbit.JcrConstants.NT_BASE;
 import static org.apache.jackrabbit.oak.commons.PathUtils.getAncestorPath;
 import static org.apache.jackrabbit.oak.commons.PathUtils.getDepth;
 import static org.apache.jackrabbit.oak.commons.PathUtils.getParentPath;
@@ -145,6 +146,15 @@ class IndexPlanner {
 
         List<String> indexedProps = newArrayListWithCapacity(filter.getPropertyRestrictions().size());
 
+        for (PropertyDefinition functionIndex : indexingRule.getFunctionRestrictions()) {
+            for (PropertyRestriction pr : filter.getPropertyRestrictions()) {
+                String f = functionIndex.function;
+                if (pr.propertyName.equals(f)) {
+                    indexedProps.add(f);
+                    result.propDefns.put(f, functionIndex);
+                }
+            }
+        }
         //Optimization - Go further only if any of the property is configured
         //for property index
         List<String> facetFields = new LinkedList<String>();
@@ -155,7 +165,7 @@ class IndexPlanner {
                     continue;
                 }
                 if (name.startsWith(QueryConstants.FUNCTION_RESTRICTION_PREFIX)) {
-                    // TODO support function-based indexes
+                    // function-based indexes were handled before
                     continue;
                 }
                 if (QueryImpl.REP_FACET.equals(pr.propertyName)) {
@@ -352,9 +362,15 @@ class IndexPlanner {
                 if (nodePath != null
                         && !indexingRule.isAggregated(nodePath)){
                     nonIndexedPaths.add(p);
-                } else if (propertyPath != null
-                        && !indexingRule.isIndexed(propertyPath)){
-                    nonIndexedPaths.add(p);
+                } else if (propertyPath != null) {
+                    PropertyDefinition pd = indexingRule.getConfig(propertyPath);
+                    //If given prop is not analyzed then its
+                    //not indexed
+                    if (pd == null){
+                        nonIndexedPaths.add(p);
+                    } else if (!pd.analyzed){
+                        nonIndexedPaths.add(p);
+                    }
                 }
 
                 if (nodeScopedTerm(propertyName)){
@@ -372,15 +388,44 @@ class IndexPlanner {
             return false;
         }
 
+        //where contains('jcr:content/bar', 'mountain OR valley') and contains('jcr:content/foo', 'mountain OR valley')
+        //above query can be evaluated by index which indexes foo and bar with restriction that both belong to same node
+        //by displacing the query path to evaluate on contains('bar', ...) and filter out those parents which do not
+        //have jcr:content as parent. So ensure that relPaths size is 1 or 0
         if (!nonIndexedPaths.isEmpty()){
             if (relPaths.size() > 1){
                 log.debug("Following relative  property paths are not index", relPaths);
                 return false;
             }
             result.setParentPath(Iterables.getOnlyElement(relPaths, ""));
-            //Such path translation would only work if index contains
-            //all the nodes
-            return definition.indexesAllTypes();
+
+            //Such non indexed path can possibly be evaluated via any rule on nt:base
+            //which can possibly index everything
+            IndexingRule rule = definition.getApplicableIndexingRule(NT_BASE);
+            if (rule == null){
+                return false;
+            }
+
+            for (String p : nonIndexedPaths){
+                //Index can only evaluate a node search jcr:content/*
+                //if it indexes node scope indexing is enabled
+                if (LucenePropertyIndex.isNodePath(p)){
+                    if (!rule.isNodeFullTextIndexed()) {
+                        return false;
+                    }
+                } else {
+                    //Index can only evaluate a property like jcr:content/type
+                    //if it indexes 'type' and that too analyzed
+                    String propertyName = PathUtils.getName(p);
+                    PropertyDefinition pd = rule.getConfig(propertyName);
+                    if (pd == null){
+                        return false;
+                    }
+                    if (!pd.analyzed){
+                        return false;
+                    }
+                }
+            }
         } else {
             result.setParentPath("");
         }
@@ -468,6 +513,13 @@ class IndexPlanner {
                 // Supports jcr:score descending natively
                 orderEntries.add(IndexDefinition.NATIVE_SORT_ORDER);
             }
+            for (PropertyDefinition functionIndex : rule.getFunctionRestrictions()) {
+                if (o.getPropertyName().equals(functionIndex.function)) {
+                    // Lucene can manage any order desc/asc
+                    orderEntries.add(o);
+                    result.sortedProperties.add(functionIndex);
+                }
+            }
         }
 
         //TODO Should we return order entries only when all order clauses are satisfied
@@ -486,6 +538,19 @@ class IndexPlanner {
                     //Theoretically there may be multiple rules for same nodeType with
                     //some condition defined. So again find a rule which applies
                     IndexingRule matchingRule = definition.getApplicableIndexingRule(rule.getNodeTypeName());
+
+                    if (matchingRule == null && rule.getNodeTypeName().equals(filter.getNodeType())){
+                        //In case nodetype registry in IndexDefinition is stale then it would not populate
+                        //rules for new nodetype even though at indexing time it was able to index (due to
+                        //use of latest nodetype reg nodestate)
+                        //In such a case if the rule name and nodetype name for query matches then it is
+                        //considered a match.
+                        //This would though not work for the case where rule is related to nodetype as used
+                        //in query matched via some inheritance chain
+                        //TODO Need a way to check if nodetype reg as seen by IndexDefinition is old then
+                        //IndexNode is reopened
+                        matchingRule = rule;
+                    }
                     if (matchingRule != null){
                         log.debug("Applicable IndexingRule found {}", matchingRule);
                         return rule;
@@ -513,7 +578,21 @@ class IndexPlanner {
             //Relative parent properties where [../foo1] is not null
             return true;
         }
-        return false;
+        boolean failTestOnMissingFunctionIndex = true;
+        if (failTestOnMissingFunctionIndex) {
+            // this means even just function restrictions fail the test
+            // (for example "where upper(name) = 'X'", 
+            // if a matching function-based index is missing
+            return false;
+        }
+        // the following would ensure the test doesn't fail in that case:
+        for (PropertyRestriction r : filter.getPropertyRestrictions()) {
+            if (!r.propertyName.startsWith(QueryConstants.FUNCTION_RESTRICTION_PREFIX)) {
+                // not a function restriction
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

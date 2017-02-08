@@ -31,6 +31,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 import javax.annotation.Nonnull;
 
@@ -47,11 +49,13 @@ import org.apache.jackrabbit.oak.plugins.memory.AbstractBlob;
 import org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions;
 import org.apache.jackrabbit.oak.segment.file.FileBlob;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
+import org.apache.jackrabbit.oak.spi.blob.BlobOptions;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
+import org.apache.jackrabbit.oak.stats.DefaultStatisticsProvider;
 import org.junit.After;
 import org.junit.Ignore;
 import org.junit.Rule;
@@ -157,10 +161,14 @@ public class ExternalBlobIT {
         nodeStore = null;
     }
 
-    protected SegmentNodeStore getNodeStore(BlobStore blobStore) throws IOException {
+    protected SegmentNodeStore getNodeStore(BlobStore blobStore) throws Exception {
         if (nodeStore == null) {
+            ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+            
             store = fileStoreBuilder(getWorkDir()).withBlobStore(blobStore)
-                    .withMaxFileSize(1).build();
+                    .withMaxFileSize(1)
+                    .withStatisticsProvider(new DefaultStatisticsProvider(executor))
+                    .build();
             nodeStore = SegmentNodeStoreBuilders.builder(store).build();
         }
         return nodeStore;
@@ -200,6 +208,11 @@ public class ExternalBlobIT {
         @Override
         public String writeBlob(InputStream in) throws IOException {
             throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public String writeBlob(InputStream in, BlobOptions options) throws IOException {
+            return writeBlob(in);
         }
 
         @Override
@@ -271,13 +284,13 @@ public class ExternalBlobIT {
         store.flush();
 
         // blob went to the external store
-        assertTrue(store.size() < 10 * 1024);
+        assertTrue(store.getStats().getApproximateSize() < 10 * 1024);
         close();
 
         SegmentGCOptions gcOptions = defaultGCOptions().setOffline();
         store = fileStoreBuilder(getWorkDir()).withMaxFileSize(1)
                 .withGCOptions(gcOptions).build();
-        assertTrue(store.size() < 10 * 1024);
+        assertTrue(store.getStats().getApproximateSize() < 10 * 1024);
 
         store.compact();
         store.cleanup();

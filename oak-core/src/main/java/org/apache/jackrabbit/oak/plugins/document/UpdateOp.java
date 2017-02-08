@@ -34,7 +34,7 @@ import static com.google.common.base.Preconditions.checkNotNull;
  */
 public final class UpdateOp {
 
-    final String id;
+    private final String id;
 
     private boolean isNew;
     private boolean isDelete;
@@ -49,14 +49,14 @@ public final class UpdateOp {
      * @param id the primary key
      * @param isNew whether this is a new document
      */
-    public UpdateOp(String id, boolean isNew) {
+    public UpdateOp(@Nonnull String id, boolean isNew) {
         this(id, isNew, false, new HashMap<Key, Operation>(), null);
     }
 
     private UpdateOp(@Nonnull String id, boolean isNew, boolean isDelete,
                      @Nonnull Map<Key, Operation> changes,
                      @Nullable Map<Key, Condition> conditions) {
-        this.id = checkNotNull(id);
+        this.id = checkNotNull(id, "id must not be null");
         this.isNew = isNew;
         this.isDelete = isDelete;
         this.changes = checkNotNull(changes);
@@ -103,6 +103,7 @@ public final class UpdateOp {
                 new HashMap<Key, Operation>(changes), conditionMap);
     }
 
+    @Nonnull
     public String getId() {
         return id;
     }
@@ -192,9 +193,14 @@ public final class UpdateOp {
 
     /**
      * Set the property to the given String value.
+     * <p>
+     * Note that {@link Document#ID} must not be set using this method;
+     * it is sufficiently specified by the id parameter set in the constructor.
      *
      * @param property the property name
      * @param value the value
+     * @throws IllegalArgumentException
+     *             if an attempt is made to set {@link Document#ID}.
      */
     public void set(String property, String value) {
         internalSet(property, value);
@@ -339,6 +345,10 @@ public final class UpdateOp {
     }
 
     private void internalSet(String property, Object value) {
+        if (Document.ID.equals(property)) {
+            throw new IllegalArgumentException(
+                    "updateOp.id (" + id + ") must not set " + Document.ID);
+        }
         Operation op = new Operation(Operation.Type.SET, value);
         changes.put(new Key(property, null), op);
     }

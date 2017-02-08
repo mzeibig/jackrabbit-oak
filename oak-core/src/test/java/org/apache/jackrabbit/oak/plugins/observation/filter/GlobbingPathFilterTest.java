@@ -85,6 +85,50 @@ public class GlobbingPathFilterTest {
 
         assertTrue(filter.includeAdd("q", tree.getNodeState()));
     }
+    
+    @Test
+    public void wildcardMatches() {
+        EventFilter filter = new GlobbingPathFilter("*.*");
+        assertFalse(filter.includeAdd("a", tree.getNodeState()));
+        assertTrue(filter.includeAdd(".b", tree.getNodeState()));
+        assertTrue(filter.includeAdd("a.b", tree.getNodeState()));
+        assertTrue(filter.includeAdd("a.", tree.getNodeState()));
+        
+        filter = new GlobbingPathFilter("*.html");
+        assertFalse(filter.includeAdd("a.b", tree.getNodeState()));
+        assertFalse(filter.includeAdd("html", tree.getNodeState()));
+        assertTrue(filter.includeAdd(".html", tree.getNodeState()));
+        assertTrue(filter.includeAdd("a.html", tree.getNodeState()));
+
+        filter = new GlobbingPathFilter("*foo*.html");
+        assertFalse(filter.includeAdd("a.b", tree.getNodeState()));
+        assertFalse(filter.includeAdd("a.html", tree.getNodeState()));
+        assertTrue(filter.includeAdd("foo.html", tree.getNodeState()));
+        assertTrue(filter.includeAdd("my-foo-bar.html", tree.getNodeState()));
+    }
+
+    /**
+     * match ** 'in the middle'
+     */
+    @Test
+    public void inTheMiddle() {
+        EventFilter filter = new GlobbingPathFilter("/foo/"+STAR_STAR+"/bar");
+        ImmutableTree t = tree;
+
+        for(String name : elements("foo/a/b/c")) {
+            t = t.getChild(name);
+            assertFalse(filter.includeAdd(name, t.getNodeState()));
+            filter = filter.create(name, t.getNodeState(), t.getNodeState());
+            assertNotNull(filter);
+        }
+
+        for(String name : elements("bar")) {
+            t = t.getChild(name);
+            assertTrue(filter.includeAdd(name, t.getNodeState()));
+            filter = filter.create(name, t.getNodeState(), t.getNodeState());
+            assertNotNull(filter);
+        }
+    }
 
     /**
      * ** should match every path

@@ -82,7 +82,7 @@ public class MarkSweepGarbageCollector implements BlobGarbageCollector {
 
     public static final String TEMP_DIR = StandardSystemProperty.JAVA_IO_TMPDIR.value();
 
-    public static final int DEFAULT_BATCH_COUNT = 2048;
+    public static final int DEFAULT_BATCH_COUNT = 1024;
     
     public static final String DELIM = ",";
 
@@ -267,8 +267,10 @@ public class MarkSweepGarbageCollector implements BlobGarbageCollector {
                 threw = false;
 
                 long maxTime = getLastMaxModifiedTime(markStart) > 0 ? getLastMaxModifiedTime(markStart) : markStart;
-                LOG.info("Blob garbage collection completed in {}. Number of blobs deleted [{}] with max modification time of [{}]",
-                        sw.toString(), deleteCount, timestampToString(maxTime));
+                sw.stop();
+
+                LOG.info("Blob garbage collection completed in {} ({} ms). Number of blobs deleted [{}] with max modification time of [{}]",
+                        sw.toString(), sw.elapsed(TimeUnit.MILLISECONDS), deleteCount, timestampToString(maxTime));
             }
         } catch (Exception e) {
             LOG.error("Blob garbage collection error", e);
@@ -521,7 +523,7 @@ public class MarkSweepGarbageCollector implements BlobGarbageCollector {
     
             // Find all blobs available in the blob store
             ListenableFutureTask<Integer> blobIdRetriever = ListenableFutureTask.create(new BlobIdRetriever(fs,
-                false));
+                true));
             executor.execute(blobIdRetriever);
     
             // Mark all used blob references

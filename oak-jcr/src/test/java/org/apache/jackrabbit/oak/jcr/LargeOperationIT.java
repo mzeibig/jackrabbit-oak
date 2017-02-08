@@ -27,7 +27,6 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
 
 import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
@@ -134,7 +133,7 @@ public class LargeOperationIT {
     }
 
     @Parameterized.Parameters
-    public static Collection<Object[]> fixtures() throws IOException {
+    public static Collection<Object[]> fixtures() throws Exception {
         File file = new File(new File("target"), "tar." + System.nanoTime());
         SegmentStore segmentStore = FileStore.builder(file).withMaxFileSize(256).withMemoryMapping(true).build();
 

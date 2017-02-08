@@ -24,12 +24,13 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 
-import com.google.common.base.Predicates;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 
 import org.apache.jackrabbit.oak.api.CommitFailedException;
+import org.apache.jackrabbit.oak.api.PropertyState;
+import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.plugins.document.VersionGarbageCollector.VersionGCStats;
 import org.apache.jackrabbit.oak.plugins.document.memory.MemoryDocumentStore;
 import org.apache.jackrabbit.oak.plugins.document.util.Utils;
@@ -39,9 +40,11 @@ import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.junit.Test;
 
+import static com.google.common.collect.Maps.newLinkedHashMap;
 import static com.google.common.collect.Sets.newHashSet;
 import static org.apache.jackrabbit.oak.plugins.document.Collection.NODES;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.COLLISIONS;
+import static org.apache.jackrabbit.oak.plugins.document.TestUtils.NO_BINARY;
 import static org.apache.jackrabbit.oak.plugins.document.util.Utils.getRootDocument;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -69,7 +72,7 @@ public class NodeDocumentTest {
         }
         UpdateUtils.applyChanges(doc, op);
         RevisionVector head = DummyRevisionContext.INSTANCE.getHeadRevision();
-        doc.split(DummyRevisionContext.INSTANCE, head, Predicates.<String>alwaysFalse());
+        doc.split(DummyRevisionContext.INSTANCE, head, NO_BINARY);
     }
 
     @Test
@@ -203,7 +206,7 @@ public class NodeDocumentTest {
                 RevisionVector head = ns.getHeadRevision();
                 for (UpdateOp op : SplitOperations.forDocument(
                         getRootDocument(store), ns, head,
-                        Predicates.<String>alwaysFalse(), 2)) {
+                        NO_BINARY, 2)) {
                     store.createOrUpdate(NODES, op);
                 }
             }
@@ -319,7 +322,7 @@ public class NodeDocumentTest {
                 NodeDocument doc = ns.getDocumentStore().find(
                         NODES, Utils.getIdFromPath("/test"));
                 for (UpdateOp op : SplitOperations.forDocument(
-                        doc, ns, head, Predicates.<String>alwaysFalse(), 2)) {
+                        doc, ns, head, NO_BINARY, 2)) {
                     store.createOrUpdate(NODES, op);
                 }
             }
@@ -488,26 +491,8 @@ public class NodeDocumentTest {
         DocumentNodeStore ns2 = createTestStore(store, 2, 0);
         List<DocumentNodeStore> nodeStores = Lists.newArrayList(ns1, ns2);
 
-        List<RevisionVector> headRevisions = Lists.newArrayList();
-        for (int i = 0; i < numChanges; i++) {
-            DocumentNodeStore ns = nodeStores.get(random.nextInt(nodeStores.size()));
-            ns.runBackgroundOperations();
-            NodeBuilder builder = ns.getRoot().builder();
-            builder.setProperty("p", i);
-            merge(ns, builder);
-            headRevisions.add(ns.getHeadRevision());
-            ns.runBackgroundOperations();
-            if (random.nextDouble() < 0.2) {
-                RevisionVector head = ns.getHeadRevision();
-                for (UpdateOp op : SplitOperations.forDocument(
-                        getRootDocument(store), ns, head,
-                        Predicates.<String>alwaysFalse(), 2)) {
-                    store.createOrUpdate(NODES, op);
-                }
-            }
-        }
-
-        headRevisions = Lists.reverse(headRevisions);
+        List<RevisionVector> headRevisions = Lists.reverse(
+                createTestData(nodeStores, random, numChanges));
         NodeDocument doc = getRootDocument(store);
         for (int i = 0; i < 10; i++) {
             int idx = random.nextInt(numChanges);
@@ -588,7 +573,7 @@ public class NodeDocumentTest {
         NodeDocument test = ns2.getDocumentStore().find(NODES, testId);
         assertNotNull(test);
         List<UpdateOp> ops = SplitOperations.forDocument(test, ns2,
-                ns2.getHeadRevision(), Predicates.<String>alwaysFalse(), 2);
+                ns2.getHeadRevision(), NO_BINARY, 2);
         assertEquals(2, ops.size());
         for (UpdateOp op : ops) {
             ns2.getDocumentStore().createOrUpdate(NODES, op);
@@ -604,7 +589,7 @@ public class NodeDocumentTest {
             merge(ns1, b1);
             test = ns1.getDocumentStore().find(NODES, testId);
             for (UpdateOp op : SplitOperations.forDocument(test, ns1,
-                    ns1.getHeadRevision(), Predicates.<String>alwaysFalse(), 3)) {
+                    ns1.getHeadRevision(), NO_BINARY, 3)) {
                 ns1.getDocumentStore().createOrUpdate(NODES, op);
             }
             headRevs.add(ns1.getHeadRevision());
@@ -633,6 +618,185 @@ public class NodeDocumentTest {
         ns.dispose();
     }
 
+    @Test
+    public void tooManyReadsOnGetNodeAtRevision() throws Exception {
+        final int numChanges = 200;
+        final Set<String> prevDocCalls = newHashSet();
+        MemoryDocumentStore store = new MemoryDocumentStore() {
+            @Override
+            public <T extends Document> T find(Collection<T> collection,
+                                               String key) {
+                if (Utils.getPathFromId(key).startsWith("p")) {
+                    prevDocCalls.add(key);
+                }
+                return super.find(collection, key);
+            }
+        };
+        DocumentNodeStore ns = createTestStore(store, 0, numChanges);
+        NodeDocument doc = getRootDocument(store);
+        Map<Revision, String> valueMap = doc.getValueMap("p");
+        assertEquals(200, valueMap.size());
+        Revision oldest = Iterables.getLast(valueMap.keySet());
+
+        prevDocCalls.clear();
+        DocumentNodeState state = doc.getNodeAtRevision(ns,
+                new RevisionVector(oldest), null);
+        assertNotNull(state);
+        PropertyState prop = state.getProperty("p");
+        assertNotNull(prop);
+        assertEquals(0L, (long) prop.getValue(Type.LONG));
+
+        assertTrue("too many calls for previous documents: " + prevDocCalls,
+                prevDocCalls.size() <= 2);
+
+        ns.dispose();
+    }
+
+    // OAK-5207
+    @Test
+    public void tooManyReadsOnGetVisibleChanges() throws Exception {
+        final int numChanges = 500;
+        final Set<String> prevDocCalls = newHashSet();
+        MemoryDocumentStore store = new MemoryDocumentStore() {
+            @Override
+            public <T extends Document> T find(Collection<T> collection,
+                                               String key) {
+                if (Utils.getPathFromId(key).startsWith("p")) {
+                    prevDocCalls.add(key);
+                }
+                return super.find(collection, key);
+            }
+        };
+        Random random = new Random(42);
+        DocumentNodeStore ns1 = createTestStore(store, 1, 0);
+        DocumentNodeStore ns2 = createTestStore(store, 2, 0);
+        List<DocumentNodeStore> nodeStores = Lists.newArrayList(ns1, ns2);
+        List<RevisionVector> headRevisions = Lists.reverse(
+                createTestData(nodeStores, random, numChanges));
+
+        NodeDocument doc = getRootDocument(store);
+
+        for (int i = 0; i < 20; i++) {
+            prevDocCalls.clear();
+            String value = doc.getVisibleChanges("p", headRevisions.get(i)).iterator().next().getValue();
+            assertEquals(String.valueOf(numChanges - (i + 1)), value);
+            assertTrue("too many calls for previous documents: " + prevDocCalls,
+                    prevDocCalls.size() <= 3);
+        }
+
+        ns1.dispose();
+        ns2.dispose();
+    }
+
+    @Test
+    public void tooManyReadsOnGetVisibleChangesWithLongRunningBranchCommit() throws Exception {
+        int numChanges = 843;
+        final Map<String, Document> prevDocCalls = newLinkedHashMap();
+        MemoryDocumentStore store = new MemoryDocumentStore() {
+            @Override
+            public <T extends Document> T find(Collection<T> collection,
+                                               String key) {
+                T doc = super.find(collection, key);
+                if (Utils.getPathFromId(key).startsWith("p")) {
+                    prevDocCalls.put(key, doc);
+                }
+                return doc;
+            }
+        };
+        Random random = new Random(42);
+        DocumentNodeStore ns1 = createTestStore(store, 1, 0);
+        DocumentNodeStore ns2 = createTestStore(store, 2, 0);
+        List<DocumentNodeStore> nodeStores = Lists.newArrayList(ns1, ns2);
+        List<RevisionVector> headRevisions = Lists.reverse(
+                createTestData(nodeStores, random, numChanges));
+
+        NodeBuilder builder = ns1.getRoot().builder();
+        builder.setProperty("q", 1);
+        int numNodes = 0;
+        while (getRootDocument(store).getValueMap("q").isEmpty()) {
+            // write some other changes until a branch is created
+            NodeBuilder child = builder.child("n-" + numNodes++);
+            for (int i = 0; i < 50; i++) {
+                child.setProperty("p-" + i, i);
+            }
+        }
+        // do not yet merge, but create more test data
+        int numMoreChanges = 50;
+        List<RevisionVector> moreRevs = Lists.reverse(
+                createTestData(nodeStores, random, numMoreChanges, numChanges));
+        headRevisions = Lists.newArrayList(Iterables.concat(moreRevs, headRevisions));
+        numChanges += numMoreChanges;
+
+        // now merge the branch and update 'q'. this will split
+        // the old value to a previous document
+        merge(ns1, builder);
+        builder = ns1.getRoot().builder();
+        builder.setProperty("q", 2);
+        merge(ns1, builder);
+
+        // and create yet more test data
+        numMoreChanges = 50;
+        moreRevs = Lists.reverse(
+                createTestData(nodeStores, random, numMoreChanges, numChanges));
+        headRevisions = Lists.newArrayList(Iterables.concat(moreRevs, headRevisions));
+        numChanges += numMoreChanges;
+
+        NodeDocument doc = getRootDocument(store);
+
+        for (int i = 0; i < 20; i++) {
+            prevDocCalls.clear();
+            String value = doc.getVisibleChanges("p", headRevisions.get(i)).iterator().next().getValue();
+            assertEquals(String.valueOf(numChanges - (i + 1)), value);
+            assertTrue("too many calls for previous documents ("
+                            + prevDocCalls.size() + "): " + prevDocCalls,
+                    prevDocCalls.size() <= 8);
+        }
+
+        ns1.dispose();
+        ns2.dispose();
+    }
+
+    @Test
+    public void getVisibleChanges() throws Exception {
+        final int numChanges = 200;
+        Random random = new Random();
+        DocumentNodeStore ns = createTestStore(numChanges);
+        DocumentStore store = ns.getDocumentStore();
+        NodeDocument doc = getRootDocument(store);
+        for (int i = 0; i < 10; i++) {
+            int idx = random.nextInt(numChanges);
+            Revision r = Iterables.get(doc.getValueMap("p").keySet(), idx);
+            Iterable<Map.Entry<Revision, String>> revs = doc.getVisibleChanges("p", new RevisionVector(r));
+            assertEquals(idx, numChanges - Iterables.size(revs));
+        }
+        ns.dispose();
+    }
+
+    @Test
+    public void getVisibleChangesMixedClusterIds() throws Exception {
+        final int numChanges = 200;
+        Random random = new Random();
+        MemoryDocumentStore store = new MemoryDocumentStore();
+        DocumentNodeStore ns1 = createTestStore(store, 1, 0);
+        DocumentNodeStore ns2 = createTestStore(store, 2, 0);
+        List<DocumentNodeStore> nodeStores = Lists.newArrayList(ns1, ns2);
+
+        List<RevisionVector> headRevisions = Lists.reverse(
+                createTestData(nodeStores, random, numChanges));
+        NodeDocument doc = getRootDocument(store);
+        for (int i = 0; i < 10; i++) {
+            int idx = random.nextInt(numChanges);
+            RevisionVector r = headRevisions.get(idx);
+            Iterable<Map.Entry<Revision, String>> revs1 = doc.getVisibleChanges("p", r);
+            Iterable<Map.Entry<Revision, String>> revs2 = doc.getVisibleChanges("p", r);
+            assertEquals(Iterables.size(revs1), Iterables.size(revs2));
+            assertEquals(idx, numChanges - Iterables.size(revs1));
+        }
+
+        ns1.dispose();
+        ns2.dispose();
+    }
+
     private DocumentNodeStore createTestStore(int numChanges) throws Exception {
         return createTestStore(new MemoryDocumentStore(), 0, numChanges);
     }
@@ -651,12 +815,46 @@ public class NodeDocumentTest {
                 RevisionVector head = ns.getHeadRevision();
                 for (UpdateOp op : SplitOperations.forDocument(
                         getRootDocument(store), ns, head,
-                        Predicates.<String>alwaysFalse(), 2)) {
+                        NO_BINARY, 2)) {
                     store.createOrUpdate(NODES, op);
                 }
             }
         }
         return ns;
+    }
+
+    private List<RevisionVector> createTestData(List<DocumentNodeStore> nodeStores,
+                                                Random random,
+                                                int numChanges)
+            throws CommitFailedException {
+        return createTestData(nodeStores, random, numChanges, 0);
+    }
+
+    private List<RevisionVector> createTestData(List<DocumentNodeStore> nodeStores,
+                                                Random random,
+                                                int numChanges,
+                                                int startValue)
+            throws CommitFailedException {
+        List<RevisionVector> headRevisions = Lists.newArrayList();
+        for (int i = startValue; i < numChanges + startValue; i++) {
+            DocumentNodeStore ns = nodeStores.get(random.nextInt(nodeStores.size()));
+            ns.runBackgroundOperations();
+            NodeBuilder builder = ns.getRoot().builder();
+            builder.setProperty("p", i);
+            merge(ns, builder);
+            headRevisions.add(ns.getHeadRevision());
+            ns.runBackgroundOperations();
+            if (random.nextDouble() < 0.2) {
+                DocumentStore store = ns.getDocumentStore();
+                RevisionVector head = ns.getHeadRevision();
+                for (UpdateOp op : SplitOperations.forDocument(
+                        getRootDocument(store), ns, head,
+                        NO_BINARY, 2)) {
+                    store.createOrUpdate(NODES, op);
+                }
+            }
+        }
+        return headRevisions;
     }
 
     private void merge(NodeStore store, NodeBuilder builder)

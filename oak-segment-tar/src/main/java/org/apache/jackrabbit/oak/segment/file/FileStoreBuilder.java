@@ -24,8 +24,8 @@ import static com.google.common.base.Preconditions.checkState;
 import static org.apache.jackrabbit.oak.segment.CachingSegmentReader.DEFAULT_STRING_CACHE_MB;
 import static org.apache.jackrabbit.oak.segment.CachingSegmentReader.DEFAULT_TEMPLATE_CACHE_MB;
 import static org.apache.jackrabbit.oak.segment.SegmentCache.DEFAULT_SEGMENT_CACHE_MB;
-import static org.apache.jackrabbit.oak.segment.WriterCacheManager.DEFAULT_NODE_CACHE_CAPACITY;
-import static org.apache.jackrabbit.oak.segment.WriterCacheManager.DEFAULT_NODE_CACHE_DEPTH;
+import static org.apache.jackrabbit.oak.segment.SegmentNotFoundExceptionListener.LOG_SNFE;
+import static org.apache.jackrabbit.oak.segment.WriterCacheManager.DEFAULT_NODE_CACHE_SIZE;
 import static org.apache.jackrabbit.oak.segment.WriterCacheManager.DEFAULT_STRING_CACHE_SIZE;
 import static org.apache.jackrabbit.oak.segment.WriterCacheManager.DEFAULT_TEMPLATE_CACHE_SIZE;
 import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.defaultGCOptions;
@@ -37,15 +37,15 @@ import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
 import com.google.common.base.Predicate;
-import org.apache.jackrabbit.oak.segment.NodeCache;
+import org.apache.jackrabbit.oak.segment.CacheWeights.NodeCacheWeigher;
+import org.apache.jackrabbit.oak.segment.CacheWeights.StringCacheWeigher;
+import org.apache.jackrabbit.oak.segment.CacheWeights.TemplateCacheWeigher;
 import org.apache.jackrabbit.oak.segment.RecordCache;
-import org.apache.jackrabbit.oak.segment.Template;
+import org.apache.jackrabbit.oak.segment.SegmentNotFoundExceptionListener;
 import org.apache.jackrabbit.oak.segment.WriterCacheManager;
 import org.apache.jackrabbit.oak.segment.compaction.LoggingGCMonitor;
 import org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions;
-import org.apache.jackrabbit.oak.segment.file.FileStore.ReadOnlyStore;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
-import org.apache.jackrabbit.oak.spi.gc.DelegatingGCMonitor;
 import org.apache.jackrabbit.oak.spi.gc.GCMonitor;
 import org.apache.jackrabbit.oak.stats.StatisticsProvider;
 import org.slf4j.Logger;
@@ -57,13 +57,18 @@ import org.slf4j.LoggerFactory;
 public class FileStoreBuilder {
     private static final Logger LOG = LoggerFactory.getLogger(FileStore.class);
 
+    private static final boolean MEMORY_MAPPING_DEFAULT =
+            "64".equals(System.getProperty("sun.arch.data.model", "32"));
+
+    public static final int DEFAULT_MAX_FILE_SIZE = 256;
+
     @Nonnull
     private final File directory;
 
     @CheckForNull
     private BlobStore blobStore;   // null ->  store blobs inline
 
-    private int maxFileSize = 256;
+    private int maxFileSize = DEFAULT_MAX_FILE_SIZE;
 
     private int segmentCacheSize = DEFAULT_SEGMENT_CACHE_MB;
 
@@ -75,11 +80,9 @@ public class FileStoreBuilder {
 
     private int templateDeduplicationCacheSize = DEFAULT_TEMPLATE_CACHE_SIZE;
 
-    private int nodeDeduplicationCacheSize = DEFAULT_NODE_CACHE_CAPACITY;
+    private int nodeDeduplicationCacheSize = DEFAULT_NODE_CACHE_SIZE;
 
-    private int nodeDeduplicationCacheDepth = DEFAULT_NODE_CACHE_DEPTH;
-
-    private boolean memoryMapping;
+    private boolean memoryMapping = MEMORY_MAPPING_DEFAULT;
 
     @Nonnull
     private StatisticsProvider statsProvider = StatisticsProvider.NOOP;
@@ -87,66 +90,31 @@ public class FileStoreBuilder {
     @Nonnull
     private SegmentGCOptions gcOptions = defaultGCOptions();
 
-    @Nonnull
-    private final EvictingWriteCacheManager cacheManager = new EvictingWriteCacheManager(
-            stringDeduplicationCacheSize, templateDeduplicationCacheSize,
-            nodeDeduplicationCacheSize, nodeDeduplicationCacheDepth);
+    @CheckForNull
+    private EvictingWriteCacheManager cacheManager;
 
     @Nonnull
-    private final DelegatingGCMonitor gcMonitor = new DelegatingGCMonitor();
-
-    @Nonnull
-    private final GCListener gcListener = new GCListener() {
+    private final GCListener gcListener = new GCListener(){
         @Override
-        public void info(String message, Object... arguments) {
-            gcMonitor.info(message, arguments);
+        public void compactionSucceeded(int newGeneration) {
+            compacted();
+            if (cacheManager != null) {
+                cacheManager.evictOldGeneration(newGeneration);
+            }
         }
 
         @Override
-        public void warn(String message, Object... arguments) {
-            gcMonitor.warn(message, arguments);
-        }
-
-        @Override
-        public void error(String message, Exception exception) {
-            gcMonitor.error(message, exception);
-        }
-
-        @Override
-        public void skipped(String reason, Object... arguments) {
-            gcMonitor.skipped(reason, arguments);
-        }
-
-        @Override
-        public void compacted(long[] segmentCounts, long[] recordCounts, long[] compactionMapWeights) {
-            gcMonitor.compacted(segmentCounts, recordCounts, compactionMapWeights);
-        }
-
-        @Override
-        public void cleaned(long reclaimedSize, long currentSize) {
-            gcMonitor.cleaned(reclaimedSize, currentSize);
-        }
-
-        @Override
-        public void compacted(@Nonnull Status status, final int newGeneration) {
-            switch (status) {
-                case SUCCESS:
-                    // FIXME OAK-4283: Align GCMonitor API with implementation
-                    // This call is still needed to ensure upstream consumers
-                    // of GCMonitor callback get properly notified. See
-                    // RepositoryImpl.RefreshOnGC and
-                    // LuceneIndexProviderService.registerGCMonitor().
-                    gcMonitor.compacted(new long[0], new long[0], new long[0]);
-                    cacheManager.evictOldGeneration(newGeneration);
-                    break;
-                case FAILURE:
-                    cacheManager.evictGeneration(newGeneration);
+        public void compactionFailed(int failedGeneration) {
+            if (cacheManager != null) {
+                cacheManager.evictGeneration(failedGeneration);
             }
         }
     };
 
-    @CheckForNull
-    private TarRevisions revisions;
+    @Nonnull
+    private SegmentNotFoundExceptionListener snfeListener = LOG_SNFE;
+    
+    private boolean built;
 
     /**
      * Create a new instance of a {@code FileStoreBuilder} for a file store.
@@ -160,7 +128,7 @@ public class FileStoreBuilder {
 
     private FileStoreBuilder(@Nonnull File directory) {
         this.directory = checkNotNull(directory);
-        this.gcMonitor.registerGCMonitor(new LoggingGCMonitor(LOG));
+        this.gcListener.registerGCMonitor(new LoggingGCMonitor(LOG));
     }
 
     /**
@@ -242,23 +210,12 @@ public class FileStoreBuilder {
 
     /**
      * Number of items to keep in the node deduplication cache
-     * @param nodeDeduplicationCacheSize  None negative cache size
+     * @param nodeDeduplicationCacheSize  None negative cache size. Must be a power of 2.
      * @return this instance
      */
     @Nonnull
     public FileStoreBuilder withNodeDeduplicationCacheSize(int nodeDeduplicationCacheSize) {
         this.nodeDeduplicationCacheSize = nodeDeduplicationCacheSize;
-        return this;
-    }
-
-    /**
-     * Maximal depth of the node deduplication cache
-     * @param nodeDeduplicationCacheDepth
-     * @return this instance
-     */
-    @Nonnull
-    public FileStoreBuilder withNodeDeduplicationDepth(int nodeDeduplicationCacheDepth) {
-        this.nodeDeduplicationCacheDepth = nodeDeduplicationCacheDepth;
         return this;
     }
 
@@ -279,7 +236,7 @@ public class FileStoreBuilder {
      */
     @Nonnull
     public FileStoreBuilder withDefaultMemoryMapping() {
-        this.memoryMapping = FileStore.MEMORY_MAPPING_DEFAULT;
+        this.memoryMapping = MEMORY_MAPPING_DEFAULT;
         return this;
     }
 
@@ -290,7 +247,7 @@ public class FileStoreBuilder {
      */
     @Nonnull
     public FileStoreBuilder withGCMonitor(@Nonnull GCMonitor gcMonitor) {
-        this.gcMonitor.registerGCMonitor(checkNotNull(gcMonitor));
+        this.gcListener.registerGCMonitor(checkNotNull(gcMonitor));
         return this;
     }
 
@@ -317,6 +274,17 @@ public class FileStoreBuilder {
     }
 
     /**
+     * {@link SegmentNotFoundExceptionListener} listener for  {@code SegmentNotFoundException}
+     * @param snfeListener, the actual listener
+     * @return this instance
+     */
+    @Nonnull
+    public FileStoreBuilder withSnfeListener(@Nonnull SegmentNotFoundExceptionListener snfeListener) {
+        this.snfeListener = checkNotNull(snfeListener);
+        return this;
+    }
+    
+    /**
      * Create a new {@link FileStore} instance with the settings specified in this
      * builder. If none of the {@code with} methods have been called before calling
      * this method, a file store with the following default settings is returned:
@@ -334,16 +302,29 @@ public class FileStoreBuilder {
      * @throws IOException
      */
     @Nonnull
-    public FileStore build() throws IOException {
-        checkState(revisions == null, "Cannot re-use builder");
-        directory.mkdir();
-        revisions = new TarRevisions(false, directory);
+    public FileStore build() throws InvalidFileStoreVersionException, IOException {
+        checkState(!built, "Cannot re-use builder");
+        built = true;
+        directory.mkdirs();
+        TarRevisions revisions = new TarRevisions(directory);
         LOG.info("Creating file store {}", this);
-        return new FileStore(this, false).bind(revisions);
+        FileStore store;
+        try {
+            store = new FileStore(this);
+        } catch (InvalidFileStoreVersionException | IOException e) {
+            try {
+                revisions.close();
+            } catch (IOException re) {
+                LOG.warn("Unable to close TarRevisions", re);
+            }
+            throw e;
+        }
+        store.bind(revisions);
+        return store;
     }
 
     /**
-     * Create a new {@link ReadOnlyStore} instance with the settings specified in this
+     * Create a new {@link ReadOnlyFileStore} instance with the settings specified in this
      * builder. If none of the {@code with} methods have been called before calling
      * this method, a file store with the following default settings is returned:
      * <ul>
@@ -360,12 +341,25 @@ public class FileStoreBuilder {
      * @throws IOException
      */
     @Nonnull
-    public ReadOnlyStore buildReadOnly() throws IOException {
-        checkState(revisions == null, "Cannot re-use builder");
+    public ReadOnlyFileStore buildReadOnly() throws InvalidFileStoreVersionException, IOException {
+        checkState(!built, "Cannot re-use builder");
         checkState(directory.exists() && directory.isDirectory());
-        revisions = new TarRevisions(true, directory);
+        built = true;
+        ReadOnlyRevisions revisions = new ReadOnlyRevisions(directory);
         LOG.info("Creating file store {}", this);
-        return new ReadOnlyStore(this).bind(revisions);
+        ReadOnlyFileStore store;
+        try {
+            store = new ReadOnlyFileStore(this);
+        } catch (InvalidFileStoreVersionException | IOException e) {
+            try {
+                revisions.close();
+            } catch (IOException re) {
+                LOG.warn("Unable to close ReadOnlyRevisions", re);
+            }
+            throw e;
+        }
+        store.bind(revisions);
+        return store;
     }
 
     @Nonnull
@@ -412,15 +406,18 @@ public class FileStoreBuilder {
     SegmentGCOptions getGcOptions() {
         return gcOptions;
     }
-
+    
     @Nonnull
-    TarRevisions getRevisions() {
-        checkState(revisions != null, "File store not yet built");
-        return revisions;
+    SegmentNotFoundExceptionListener getSnfeListener() {
+        return snfeListener;
     }
 
     @Nonnull
     WriterCacheManager getCacheManager() {
+        if (cacheManager == null) {
+            cacheManager = new EvictingWriteCacheManager(
+                    stringDeduplicationCacheSize, templateDeduplicationCacheSize, nodeDeduplicationCacheSize);
+        }
         return cacheManager;
     }
 
@@ -436,18 +433,16 @@ public class FileStoreBuilder {
                 ", stringDeduplicationCacheSize=" + stringDeduplicationCacheSize +
                 ", templateDeduplicationCacheSize=" + templateDeduplicationCacheSize +
                 ", nodeDeduplicationCacheSize=" + nodeDeduplicationCacheSize +
-                ", nodeDeduplicationCacheDepth=" + nodeDeduplicationCacheDepth +
                 ", memoryMapping=" + memoryMapping +
                 ", gcOptions=" + gcOptions +
                 '}';
     }
 
     private static class EvictingWriteCacheManager extends WriterCacheManager.Default {
-        public EvictingWriteCacheManager(int stringCacheSize, int templateCacheSize,
-                                         int nodeCacheCapacity, int nodeCacheDepth) {
-            super(RecordCache.<String>factory(stringCacheSize),
-                RecordCache.<Template>factory(templateCacheSize),
-                NodeCache.factory(nodeCacheCapacity, nodeCacheDepth));
+        public EvictingWriteCacheManager(int stringCacheSize, int templateCacheSize, int nodeCacheSize) {
+            super(RecordCache.factory(stringCacheSize, new StringCacheWeigher()),
+                RecordCache.factory(templateCacheSize, new TemplateCacheWeigher()),
+                PriorityCache.factory(nodeCacheSize, new NodeCacheWeigher()));
         }
 
         void evictOldGeneration(final int newGeneration) {

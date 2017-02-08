@@ -30,7 +30,7 @@
   <groupId>org.apache.jackrabbit</groupId>
   <artifactId>oak-parent</artifactId>
   <name>Oak Parent POM</name>
-  <version>1.5.7</version>
+  <version>1.6.0</version>
   <packaging>pom</packaging>
 
   <properties>
@@ -42,14 +42,14 @@
     <project.reporting.outputEncoding>
       ${project.build.sourceEncoding}
     </project.reporting.outputEncoding>
-    <jackrabbit.version>2.13.1</jackrabbit.version>
+    <jackrabbit.version>2.14.0</jackrabbit.version>
     <mongo.host>127.0.0.1</mongo.host>
     <mongo.port>27017</mongo.port>
     <mongo.db>MongoMKDB</mongo.db>
     <mongo.db2>MongoMKDB2</mongo.db2>
     <segment.db>SegmentMK</segment.db>
     <lucene.version>4.7.1</lucene.version>
-    <mongo.driver.version>2.14.0</mongo.driver.version>
+    <mongo.driver.version>3.4.0</mongo.driver.version>
     <!-- Note that we're using SLF4J API version 1.7 when compiling     -->
     <!-- core Oak components but more recent SLF4J and Logback versions -->
     <!-- when compiling and running test cases and the oak-run jar.     -->
@@ -59,21 +59,21 @@
     <slf4j.api.version>1.7.6</slf4j.api.version>
     <slf4j.version>1.7.6</slf4j.version> <!-- sync with logback version -->
     <logback.version>1.1.0</logback.version>
-    <h2.version>1.4.190</h2.version>
+    <h2.version>1.4.193</h2.version>
     <findbugs.version>3.0.0</findbugs.version>
     <derby.version>10.12.1.1</derby.version>
     <java.version>1.7</java.version>
+    <java.version.signature>java17</java.version.signature>
     
    <!-- specifies on which fixture to run the integration testing tests. 
       override in profiles or provide from command line to change behaviour. Provide 
       more fixtures space separated. See org.apache.jackrabbit.oak.jcr.FixturesHelper#AVAILABLE_FIXTURES 
-      for the possible values: SEGMENT_MK DOCUMENT_NS DOCUMENT_RDB -->
-    <fixtures>SEGMENT_MK</fixtures>
+      for the possible values: SEGMENT_MK SEGMENT_TAR DOCUMENT_NS DOCUMENT_RDB -->
+    <fixtures>SEGMENT_TAR</fixtures>
 
    <!-- whether skip the surefire unit testing during the integration testing. 
       Override with -Dsurefire.skip.ut=true when needed -->
     <surefire.skip.ut>false</surefire.skip.ut>
-    <segment.tar.version>0.0.4</segment.tar.version>
   </properties>
 
   <issueManagement>
@@ -101,12 +101,26 @@
           </configuration>
         </plugin>
         <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>animal-sniffer-maven-plugin</artifactId>
+          <version>1.15</version>
+          <configuration>
+            <signature>
+              <groupId>org.codehaus.mojo.signature</groupId>
+              <artifactId>${java.version.signature}</artifactId>
+              <version>1.0</version>
+            </signature>
+          </configuration>
+        </plugin>
+        <plugin>
           <artifactId>maven-javadoc-plugin</artifactId>
           <configuration>
             <source>${java.version}</source>
+            <aggregate>true</aggregate>
             <links>
               <link>http://docs.oracle.com/javase/7/docs/api/</link>
-              <link>http://www.day.com/specs/javax.jcr/javadocs/jcr-2.0/</link>
+              <link>https://docs.adobe.com/docs/en/spec/javax.jcr/javadocs/jcr-2.0/</link>
+              <link>http://jackrabbit.apache.org/api/2.14/</link>
             </links>
           </configuration>
         </plugin>
@@ -432,6 +446,19 @@
           </execution>
         </executions>
       </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>animal-sniffer-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>animal-sniffer</id>
+            <phase>compile</phase>
+            <goals>
+              <goal>check</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
 
@@ -541,9 +568,19 @@
         <version>2.6</version>
       </dependency>
       <dependency>
+        <groupId>commons-io</groupId>
+        <artifactId>commons-io</artifactId>
+        <version>2.5</version>
+      </dependency>
+      <dependency>
         <groupId>org.apache.commons</groupId>
         <artifactId>commons-math3</artifactId>
-        <version>3.2</version>
+        <version>3.6.1</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.tomcat</groupId>
+        <artifactId>tomcat-jdbc</artifactId>
+        <version>7.0.72</version>
       </dependency>
     </dependencies>
   </dependencyManagement>
@@ -809,7 +846,7 @@
         <dependency>
           <groupId>mysql</groupId>
           <artifactId>mysql-connector-java</artifactId>
-          <version>5.1.39</version>
+          <version>5.1.40</version>
         </dependency>
       </dependencies>
     </profile>
@@ -819,7 +856,7 @@
         <dependency>
           <groupId>org.postgresql</groupId>
           <artifactId>postgresql</artifactId>
-          <version>9.4.1208.jre6</version>
+          <version>9.4.1211.jre6</version>
         </dependency>
       </dependencies>
     </profile>
@@ -1014,6 +1051,16 @@
                 </execution>
               </executions>
             </plugin>
+            <plugin>
+              <groupId>org.codehaus.mojo</groupId>
+              <artifactId>animal-sniffer-maven-plugin</artifactId>
+              <executions>
+                <execution>
+                  <id>animal-sniffer</id>
+                  <phase />
+                </execution>
+              </executions>
+            </plugin>
           </plugins>
         </pluginManagement>
       </build>
@@ -1021,8 +1068,8 @@
   </profiles>
 
   <scm>
-    <connection>scm:svn:http://svn.apache.org/repos/asf/maven/pom/tags/jackrabbit-oak-1.5.7/oak-parent</connection>
-    <developerConnection>scm:svn:https://svn.apache.org/repos/asf/maven/pom/tags/jackrabbit-oak-1.5.7/oak-parent</developerConnection>
-    <url>http://svn.apache.org/viewvc/maven/pom/tags/jackrabbit-oak-1.5.7/oak-parent</url>
+    <connection>scm:svn:https://svn.apache.org/repos/asf/jackrabbit/oak/tags/jackrabbit-oak-1.6.0/oak-parent</connection>
+    <developerConnection>scm:svn:https://svn.apache.org/repos/asf/jackrabbit/oak/tags/jackrabbit-oak-1.6.0/oak-parent</developerConnection>
+    <url>https://svn.apache.org/repos/asf/jackrabbit/oak/tags/jackrabbit-oak-1.6.0/oak-parent</url>
   </scm>
 </project>

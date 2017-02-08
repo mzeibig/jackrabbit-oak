@@ -27,6 +27,7 @@ import org.apache.jackrabbit.oak.plugins.segment.Compactor;
 import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeState;
 import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeStore;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
+import org.apache.jackrabbit.oak.plugins.segment.file.InvalidFileStoreVersionException;
 import org.apache.jackrabbit.oak.plugins.segment.file.tooling.BasicReadOnlyBlobStore;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
@@ -35,15 +36,17 @@ import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Stopwatch;
 
+@Deprecated
 public class FileStoreBackup {
 
     private static final Logger log = LoggerFactory
             .getLogger(FileStoreBackup.class);
 
+    @Deprecated
     public static boolean USE_FAKE_BLOBSTORE = Boolean.getBoolean("oak.backup.UseFakeBlobStore");
 
-    public static void backup(NodeStore store, File destination)
-            throws IOException {
+    @Deprecated
+    public static void backup(NodeStore store, File destination) throws IOException, InvalidFileStoreVersionException {
         checkArgument(store instanceof SegmentNodeStore);
         Stopwatch watch = Stopwatch.createStarted();
         NodeState current = ((SegmentNodeStore) store).getSuperRoot();

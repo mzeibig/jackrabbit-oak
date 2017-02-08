@@ -37,12 +37,14 @@ import org.apache.jackrabbit.oak.json.JsonSerializer;
 import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeState;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStore.ReadOnlyStore;
+import org.apache.jackrabbit.oak.plugins.segment.file.InvalidFileStoreVersionException;
 import org.apache.jackrabbit.oak.plugins.segment.file.JournalReader;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 
 /**
  * Utility for tracing a node back through the revision history.
  */
+@Deprecated
 public class RevisionHistory {
     private final ReadOnlyStore store;
 
@@ -52,7 +54,8 @@ public class RevisionHistory {
      * @param directory
      * @throws IOException
      */
-    public RevisionHistory(@Nonnull File directory) throws IOException {
+    @Deprecated
+    public RevisionHistory(@Nonnull File directory) throws IOException, InvalidFileStoreVersionException {
         this.store = FileStore.builder(checkNotNull(directory)).buildReadOnly();
     }
 
@@ -73,6 +76,7 @@ public class RevisionHistory {
      * @return
      * @throws IOException
      */
+    @Deprecated
     public Iterable<HistoryElement> getHistory(@Nonnull File journal, @Nonnull final String path)
             throws IOException {
         checkNotNull(path);
@@ -90,6 +94,7 @@ public class RevisionHistory {
     /**
      * Representation of a point in time for a given node.
      */
+    @Deprecated
     public static final class HistoryElement {
         private final String revision;
         private final NodeState node;
@@ -104,6 +109,7 @@ public class RevisionHistory {
          * @return
          */
         @Nonnull
+        @Deprecated
         public String getRevision() {
             return revision;
         }
@@ -113,6 +119,7 @@ public class RevisionHistory {
          * @return
          */
         @CheckForNull
+        @Deprecated
         public NodeState getNode() {
             return node;
         }
@@ -122,6 +129,7 @@ public class RevisionHistory {
          * @param depth
          * @return
          */
+        @Deprecated
         public String toString(int depth) {
             JsonSerializer json = new JsonSerializer(depth, 0, Integer.MAX_VALUE,
                 DEFAULT_FILTER_EXPRESSION, new BlobSerializer());
@@ -133,11 +141,13 @@ public class RevisionHistory {
          * @return  {@code toString(0)}
          */
         @Override
+        @Deprecated
         public String toString() {
             return toString(0);
         }
 
         @Override
+        @Deprecated
         public boolean equals(Object other) {
             if (this == other) {
                 return true;
@@ -153,6 +163,7 @@ public class RevisionHistory {
         }
 
         @Override
+        @Deprecated
         public int hashCode() {
             return 31 * revision.hashCode() +
                 (node != null ? node.hashCode() : 0);
