@@ -21,23 +21,27 @@ package org.apache.jackrabbit.oak.plugins.multiplex;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.util.Collection;
 import java.util.List;
+import java.util.NavigableSet;
+import java.util.TreeSet;
 
 import com.google.common.base.Function;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterables;
 
 import org.apache.jackrabbit.oak.spi.mount.Mount;
 
 import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.collect.Iterables.transform;
+import static com.google.common.collect.Sets.newTreeSet;
+import static org.apache.jackrabbit.oak.commons.PathUtils.getParentPath;
 import static org.apache.jackrabbit.oak.commons.PathUtils.isAncestor;
 
 final class MountInfo implements Mount {
 
-    private static final Function<String, String> SANITIZE_PATH =  new Function<String,String>() {
+    private static final Function<String, String> SANITIZE_PATH =  new Function<String, String>() {
         @Override
         public String apply(String input) {
-            if ( input.endsWith("/") && input.length() > 1) {
+            if (input.endsWith("/") && input.length() > 1) {
                 return input.substring(0, input.length() - 1); 
             }
             return input;
@@ -48,45 +52,43 @@ final class MountInfo implements Mount {
     private final boolean readOnly;
     private final boolean defaultMount;
     private final String pathFragmentName;
-    private final List<String> includedPaths;
+    private final boolean supportFragment;
+    private final NavigableSet<String> includedPaths;
 
-    public MountInfo(String name, boolean readOnly, boolean defaultMount,
+    public MountInfo(String name, boolean readOnly, boolean defaultMount, boolean supportFragment,
             List<String> includedPaths) {
         this.name = checkNotNull(name, "Mount name must not be null");
         this.readOnly = readOnly;
         this.defaultMount = defaultMount;
         this.pathFragmentName = "oak:mount-" + name;
         this.includedPaths = cleanCopy(includedPaths);
+        this.supportFragment = supportFragment;
     }
 
     @Override
     public boolean isUnder(String path) {
         path = SANITIZE_PATH.apply(path);
-        for (String includedPath : includedPaths) {
-            if (isAncestor(path, includedPath)) {
-                return true;
-            }
-        }
+        String nextPath = includedPaths.higher(path);
+        return nextPath != null && isAncestor(path, nextPath);
+    }
 
-        return false;
+    @Override
+    public boolean isDirectlyUnder(String path) {
+        path = SANITIZE_PATH.apply(path);
+        String nextPath = includedPaths.higher(path);
+        return nextPath != null && path.equals(getParentPath(nextPath));
     }
 
     @Override
     public boolean isMounted(String path) {
-        if (path.contains(pathFragmentName)){
+        if (supportFragment && path.contains(pathFragmentName)){
             return true;
         }
 
         path = SANITIZE_PATH.apply(path);
 
-        //TODO may be optimized via trie
-        
-        for (String includedPath : includedPaths){
-            if ( includedPath.equals(path) || isAncestor(includedPath, path)) {
-                return true;
-            }
-        }
-        return false;
+        String previousPath = includedPaths.floor(path);
+        return previousPath != null && (previousPath.equals(path) || isAncestor(previousPath, path));
     }
 
     @Override
@@ -105,13 +107,18 @@ final class MountInfo implements Mount {
     }
 
     @Override
+    public boolean isSupportFragment() {
+        return supportFragment;
+    }
+
+    @Override
     public String getPathFragmentName() {
         return pathFragmentName;
     }
 
-    private static ImmutableList<String> cleanCopy(List<String> includedPaths) {
-        // ensure that paths don't have trailing slashes - this triggers an assertion in PahtUtils isAncestor
-        return ImmutableList.copyOf(Iterables.transform(includedPaths, SANITIZE_PATH));
+    private static TreeSet<String> cleanCopy(Collection<String> includedPaths) {
+        // ensure that paths don't have trailing slashes - this triggers an assertion in PathUtils isAncestor
+        return newTreeSet(transform(includedPaths, SANITIZE_PATH));
     }
 
     @Override

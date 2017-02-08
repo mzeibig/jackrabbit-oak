@@ -22,13 +22,13 @@ package org.apache.jackrabbit.oak.segment;
 import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.util.concurrent.Uninterruptibles.sleepUninterruptibly;
 import static java.lang.Integer.getInteger;
+import static java.lang.String.valueOf;
 import static java.util.concurrent.Executors.newFixedThreadPool;
 import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.commons.io.FileUtils.byteCountToDisplaySize;
 import static org.apache.jackrabbit.oak.api.Type.STRING;
-import static org.apache.jackrabbit.oak.commons.FixturesHelper.Fixture.SEGMENT_MK;
-import static org.apache.jackrabbit.oak.commons.FixturesHelper.getFixtures;
 import static org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState.EMPTY_NODE;
 import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.defaultGCOptions;
 import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
@@ -76,6 +76,7 @@ import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.stats.Clock;
 import org.apache.jackrabbit.oak.stats.DefaultStatisticsProvider;
 import org.apache.jackrabbit.oak.stats.StatisticsProvider;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -90,12 +91,15 @@ public class CompactionAndCleanupIT {
     @Rule
     public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
-    private File getFileStoreFolder() {
-        return folder.getRoot();
+    @BeforeClass
+    public static void init() {
+        // Allow running gc without backoff. Needed for testCancelCompactionSNFE.
+        // See FileStore.GC_BACKOFF.
+        System.setProperty("oak.gc.backoff", "0");
     }
 
-    public static void assumptions() {
-        assumeTrue(getFixtures().contains(SEGMENT_MK));
+    private File getFileStoreFolder() {
+        return folder.getRoot();
     }
 
     @Test
@@ -134,7 +138,8 @@ public class CompactionAndCleanupIT {
             fileStore.flush();
 
             long size2 = fileStore.getStats().getApproximateSize();
-            assertSize("1st blob added", size2, size1 + blobSize, size1 + blobSize + (blobSize / 100));
+            assertTrue("the store should grow", size2 > size1);
+            assertTrue("the store should grow of at least the size of the blob", size2 - size1 >= blobSize);
 
             // Now remove the property. No gc yet -> size doesn't shrink
             builder = nodeStore.getRoot().builder();
@@ -143,14 +148,13 @@ public class CompactionAndCleanupIT {
             fileStore.flush();
 
             long size3 = fileStore.getStats().getApproximateSize();
-            assertSize("1st blob removed", size3, size2, size2 + 4096);
+            assertTrue("the store should grow", size3 > size2);
 
             // 1st gc cycle -> no reclaimable garbage...
             fileStore.compact();
             fileStore.cleanup();
 
             long size4 = fileStore.getStats().getApproximateSize();
-            assertSize("1st gc", size4, size3, size3 + size1);
 
             // Add another 5MB binary doubling the blob size
             builder = nodeStore.getRoot().builder();
@@ -159,21 +163,22 @@ public class CompactionAndCleanupIT {
             fileStore.flush();
 
             long size5 = fileStore.getStats().getApproximateSize();
-            assertSize("2nd blob added", size5, size4 + blobSize, size4 + blobSize + (blobSize / 100));
+            assertTrue("the store should grow", size5 > size4);
+            assertTrue("the store should grow of at least the size of the blob", size5 - size4 >= blobSize);
 
             // 2st gc cycle -> 1st blob should get collected
             fileStore.compact();
             fileStore.cleanup();
 
             long size6 = fileStore.getStats().getApproximateSize();
-            assertSize("2nd gc", size6, size5 - blobSize - size1, size5 - blobSize);
+            assertTrue("the store should shrink", size6 < size5);
+            assertTrue("the store should shrink of at least the size of the blob", size5 - size6 >= blobSize);
 
             // 3rtd gc cycle -> no  significant change
             fileStore.compact();
             fileStore.cleanup();
 
             long size7 = fileStore.getStats().getApproximateSize();
-            assertSize("3rd gc", size7, size6 * 10/11 , size6 * 10/9);
 
             // No data loss
             byte[] blob = ByteStreams.toByteArray(nodeStore.getRoot()
@@ -221,7 +226,8 @@ public class CompactionAndCleanupIT {
             fileStore.flush();
 
             long size2 = fileStore.getStats().getApproximateSize();
-            assertSize("1st blob added", size2, size1 + blobSize, size1 + blobSize + (blobSize / 100));
+            assertTrue("the store should grow", size2 > size1);
+            assertTrue("the store should grow of at least the size of the blob", size2 - size1 > blobSize);
 
             // Now remove the property. No gc yet -> size doesn't shrink
             builder = nodeStore.getRoot().builder();
@@ -230,15 +236,15 @@ public class CompactionAndCleanupIT {
             fileStore.flush();
 
             long size3 = fileStore.getStats().getApproximateSize();
-            assertSize("1st blob removed", size3, size2, size2 + 4096);
+            assertTrue("the size should grow", size3 > size2);
 
             // 1st gc cycle -> 1st blob should get collected
             fileStore.compact();
             fileStore.cleanup();
 
             long size4 = fileStore.getStats().getApproximateSize();
-            assertSize("1st gc", size4, size3 - blobSize - size1, size3
-                    - blobSize);
+            assertTrue("the store should shrink", size4 < size3);
+            assertTrue("the store should shrink of at least the size of the blob", size3 - size4 >= blobSize);
 
             // Add another 5MB binary
             builder = nodeStore.getRoot().builder();
@@ -247,21 +253,22 @@ public class CompactionAndCleanupIT {
             fileStore.flush();
 
             long size5 = fileStore.getStats().getApproximateSize();
-            assertSize("2nd blob added", size5, size4 + blobSize, size4 + blobSize + (blobSize / 100));
+            assertTrue("the store should grow", size5 > size4);
+            assertTrue("the store should grow of at least the size of the blob", size5 - size4 > blobSize);
 
             // 2st gc cycle -> 2nd blob should *not* be collected
             fileStore.compact();
             fileStore.cleanup();
 
             long size6 = fileStore.getStats().getApproximateSize();
-            assertSize("2nd gc", size6, size5 * 10/11, size5 * 10/9);
+            assertTrue("the blob should not be collected", Math.abs(size5 - size6) < blobSize);
 
             // 3rd gc cycle -> no significant change
             fileStore.compact();
             fileStore.cleanup();
 
             long size7 = fileStore.getStats().getApproximateSize();
-            assertSize("3rd gc", size7, size6 * 10/11 , size6 * 10/9);
+            assertTrue("the blob should not be collected", Math.abs(size6 - size7) < blobSize);
 
             // No data loss
             byte[] blob = ByteStreams.toByteArray(nodeStore.getRoot()
@@ -314,11 +321,17 @@ public class CompactionAndCleanupIT {
             }
 
             long size1 = fileStore.getStats().getApproximateSize();
-            assertSize("with checkpoints added", size1, size0, size0 * 11 / 10);
-            fileStore.compact();
-            fileStore.cleanup();
-            long size2 = fileStore.getStats().getApproximateSize();
-            assertSize("with checkpoints compacted", size2, size1 * 9/10, size1 * 11 / 10);
+            assertTrue("the size should grow or stay the same", size1 >= size0);
+
+            // TODO the following assertion doesn't say anything useful. The
+            // conveyed message is "the repository can shrink, grow or stay the
+            // same, as long as it remains in a 10% margin of the previous size
+            // that I took out of thin air". It has to be fixed or removed.
+
+            // fileStore.compact();
+            // fileStore.cleanup();
+            // long size2 = fileStore.getStats().getApproximateSize();
+            // assertSize("with checkpoints compacted", size2, size1 * 9/10, size1 * 11 / 10);
         } finally {
             fileStore.close();
         }
@@ -516,7 +529,7 @@ public class CompactionAndCleanupIT {
         SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
 
         NodeBuilder builder = nodeStore.getRoot().builder();
-        addNodes(builder, 10);
+        addNodes(builder, 10, "");
         nodeStore.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
         fileStore.flush();
 
@@ -546,12 +559,52 @@ public class CompactionAndCleanupIT {
         }
     }
 
-    private static void addNodes(NodeBuilder builder, int depth) {
+    /**
+     * See OAK-5517: SNFE when running compaction after a cancelled gc
+     */
+    @Test
+    public void testCancelCompactionSNFE()
+    throws Throwable {
+        final FileStore fileStore = fileStoreBuilder(getFileStoreFolder())
+                .withGCOptions(defaultGCOptions()
+                        .setRetainedGenerations(2)
+                        .setEstimationDisabled(true))
+                .withMaxFileSize(1)
+                .build();
+        try {
+            SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
+
+            final Callable<Void> cancel = new Callable<Void>() {
+                @Override
+                public Void call() throws Exception {
+                    // Give the compaction thread a head start
+                    sleepUninterruptibly(1000, MILLISECONDS);
+                    fileStore.cancelGC();
+                    return null;
+                }
+            };
+
+            for (int k = 0; k < 100; k++) {
+                NodeBuilder builder = nodeStore.getRoot().builder();
+                addNodes(builder, 10, k + "-");
+                nodeStore.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+                fileStore.flush();
+
+                // Cancelling gc should not cause a SNFE on subsequent gc runs
+                runAsync(cancel);
+                fileStore.gc();
+            }
+        } finally {
+            fileStore.close();
+        }
+    }
+
+    private static void addNodes(NodeBuilder builder, int depth, String prefix) {
         if (depth > 0) {
-            NodeBuilder child1 = builder.setChildNode("1");
-            addNodes(child1, depth - 1);
-            NodeBuilder child2 = builder.setChildNode("2");
-            addNodes(child2, depth - 1);
+            NodeBuilder child1 = builder.setChildNode(prefix + "1");
+            addNodes(child1, depth - 1, prefix);
+            NodeBuilder child2 = builder.setChildNode(prefix + "2");
+            addNodes(child2, depth - 1, prefix);
         }
     }
 
@@ -565,7 +618,6 @@ public class CompactionAndCleanupIT {
         FileStore store = fileStoreBuilder(getFileStoreFolder())
                 .withMaxFileSize(2)
                 .withMemoryMapping(true)
-                .withGCOptions(defaultGCOptions().setForceAfterFail(true))
                 .build();
         final SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(store).build();
         final AtomicBoolean compactionSuccess = new AtomicBoolean(true);
@@ -970,11 +1022,11 @@ public class CompactionAndCleanupIT {
                 results.add(executorService.submit(concurrentWriteTask));
             }
 
-            fileStore.cleanup();
-
             for (Future<?> result : results) {
                 assertNull(result.get());
             }
+
+            fileStore.cleanup();
 
             for (String fileName : fileStoreFolder.list()) {
                 if (fileName.endsWith(".tar")) {
@@ -996,7 +1048,7 @@ public class CompactionAndCleanupIT {
         ScheduledExecutorService scheduler = newSingleThreadScheduledExecutor();
         StatisticsProvider statsProvider = new DefaultStatisticsProvider(scheduler);
         final FileStoreGCMonitor fileStoreGCMonitor = new FileStoreGCMonitor(Clock.SIMPLE);
-        
+
         final FileStore fileStore = fileStoreBuilder(getFileStoreFolder())
                 .withGCOptions(defaultGCOptions().setRetainedGenerations(2))
                 .withGCMonitor(fileStoreGCMonitor)
@@ -1106,7 +1158,70 @@ public class CompactionAndCleanupIT {
             fileStore.close();
         }
     }
-    
+
+    /**
+     * Test asserting OAK-4700: Concurrent cleanup must not remove segments that are still reachable
+     */
+    @Test
+    public void concurrentCleanup() throws Exception {
+        File fileStoreFolder = getFileStoreFolder();
+
+        final FileStore fileStore = fileStoreBuilder(fileStoreFolder)
+                .withMaxFileSize(1)
+                .build();
+
+        final SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
+        ExecutorService executorService = newFixedThreadPool(50);
+        final AtomicInteger counter = new AtomicInteger();
+
+        try {
+            Callable<Void> concurrentWriteTask = new Callable<Void>() {
+                @Override
+                public Void call() throws Exception {
+                    NodeBuilder builder = nodeStore.getRoot().builder();
+                    builder.setProperty("blob-" + counter.getAndIncrement(), createBlob(nodeStore, 512 * 512));
+                    nodeStore.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+                    fileStore.flush();
+                    return null;
+                }
+            };
+
+            final Callable<Void> concurrentCleanTask = new Callable<Void>() {
+                @Override
+                public Void call() throws Exception {
+                    fileStore.cleanup();
+                    return null;
+                }
+            };
+
+            List<Future<?>> results = newArrayList();
+            for (int i = 0; i < 50; i++) {
+                if (i % 2 == 0) {
+                    results.add(executorService.submit(concurrentWriteTask));
+                } else {
+                    results.add(executorService.submit(concurrentCleanTask));
+                }
+            }
+
+            for (Future<?> result : results) {
+                assertNull(result.get());
+            }
+
+            for (String fileName : fileStoreFolder.list()) {
+                if (fileName.endsWith(".tar")) {
+                    int pos = fileName.length() - "a.tar".length();
+                    char generation = fileName.charAt(pos);
+                    assertEquals("Expected nothing to be cleaned but generation '" + generation +
+                        "' for file " + fileName + " indicates otherwise.",
+                        "a", valueOf(generation));
+                }
+            }
+        } finally {
+            new ExecutorCloser(executorService).close();
+            fileStore.close();
+        }
+    }
+
     private static void addContent(NodeBuilder builder) {
         for (int k = 0; k < 10000; k++) {
             builder.setProperty(UUID.randomUUID().toString(), UUID.randomUUID().toString());

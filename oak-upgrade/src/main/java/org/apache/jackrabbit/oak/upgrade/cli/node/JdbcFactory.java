@@ -18,6 +18,7 @@ package org.apache.jackrabbit.oak.upgrade.cli.node;
 
 import org.apache.jackrabbit.oak.plugins.document.DocumentMK;
 import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStore;
+import org.apache.jackrabbit.oak.plugins.document.rdb.RDBBlobStore;
 import org.apache.jackrabbit.oak.plugins.document.rdb.RDBDataSourceFactory;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
@@ -28,6 +29,7 @@ import com.google.common.io.Closer;
 
 import javax.sql.DataSource;
 import java.io.Closeable;
+import java.io.IOException;
 
 public class JdbcFactory implements NodeStoreFactory {
 
@@ -41,7 +43,9 @@ public class JdbcFactory implements NodeStoreFactory {
 
     private final String password;
 
-    public JdbcFactory(String jdbcUri, int cacheSize, String user, String password) {
+    private final boolean readOnly;
+
+    public JdbcFactory(String jdbcUri, int cacheSize, String user, String password, boolean readOnly) {
         this.jdbcUri = jdbcUri;
         this.cacheSize = cacheSize;
         if (user == null || password == null) {
@@ -49,24 +53,46 @@ public class JdbcFactory implements NodeStoreFactory {
         }
         this.user = user;
         this.password = password;
+        this.readOnly = readOnly;
     }
 
     @Override
     public NodeStore create(BlobStore blobStore, Closer closer) {
-        DataSource ds = RDBDataSourceFactory.forJdbcUrl(jdbcUri, user, password);
-        if (ds instanceof Closeable) {
-            closer.register((Closeable)ds);
-        }
         DocumentMK.Builder builder = MongoFactory.getBuilder(cacheSize);
         if (blobStore != null) {
             builder.setBlobStore(blobStore);
         }
-        builder.setRDBConnection(ds);
+        builder.setRDBConnection(getDataSource(closer));
+        if (readOnly) {
+            builder.setReadOnlyMode();
+        }
         log.info("Initialized DocumentNodeStore on RDB with Cache size : {} MB, Fast migration : {}", cacheSize,
                 builder.isDisableBranches());
         DocumentNodeStore documentNodeStore = builder.getNodeStore();
         closer.register(MongoFactory.asCloseable(documentNodeStore));
         return documentNodeStore;
+    }
+
+    private DataSource getDataSource(Closer closer) {
+        DataSource ds = RDBDataSourceFactory.forJdbcUrl(jdbcUri, user, password);
+        if (ds instanceof Closeable) {
+            closer.register((Closeable)ds);
+        }
+        return ds;
+    }
+
+    @Override
+    public boolean hasExternalBlobReferences() throws IOException {
+        Closer closer = Closer.create();
+        try {
+            DataSource ds = getDataSource(closer);
+            RDBBlobStore blobStore = new RDBBlobStore(ds);
+            return !blobStore.getAllChunkIds(0).hasNext();
+        } catch(Throwable e) {
+            throw closer.rethrow(e);
+        } finally {
+            closer.close();
+        }
     }
 
     @Override

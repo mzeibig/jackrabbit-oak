@@ -28,13 +28,33 @@ import org.junit.Test;
 public class MountInfoTest {
 
     @Test
-    public void mountNameInPath() throws Exception{
-        MountInfo md = new MountInfo("foo", false, false, of("/a", "/b"));
+    public void testIsMounted() throws Exception{
+        MountInfo md = new MountInfo("foo", false, false, true, of("/a", "/b"));
         assertTrue(md.isMounted("/a"));
         assertTrue(md.isMounted("/b"));
         assertTrue(md.isMounted("/b/c/d"));
         assertTrue("dynamic mount path not recognized", md.isMounted("/x/y/oak:mount-foo/a"));
         assertFalse(md.isMounted("/x/y"));
         assertFalse(md.isMounted("/x/y/foo"));
+    }
+
+    @Test
+    public void testIsUnder() {
+        MountInfo md = new MountInfo("foo", false, false, true, of("/apps", "/etc/config", "/content/my/site", "/var"));
+        assertTrue(md.isUnder("/etc"));
+        assertTrue(md.isUnder("/content"));
+        assertTrue(md.isUnder("/content/my"));
+        assertFalse(md.isUnder("/content/my/site"));
+        assertFalse(md.isUnder("/libs"));
+        assertFalse(md.isUnder("/tmp"));
+    }
+
+    @Test
+    public void testIsDirectlyUnder() {
+        MountInfo md = new MountInfo("foo", false, false, true, of("/apps", "/etc/my/config", "/var"));
+        assertFalse(md.isDirectlyUnder("/etc"));
+        assertTrue(md.isDirectlyUnder("/etc/my"));
+        assertFalse(md.isDirectlyUnder("/etc/my/config"));
+        assertFalse(md.isDirectlyUnder("/libs"));
     }
 }

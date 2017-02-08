@@ -34,8 +34,6 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
@@ -43,7 +41,7 @@ import javax.annotation.Nullable;
 
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.UncheckedExecutionException;
@@ -133,11 +131,6 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
     }
 
     public static final int IN_CLAUSE_BATCH_SIZE = 500;
-
-    private static final ImmutableSet<String> SERVER_DETAIL_FIELD_NAMES
-            = ImmutableSet.<String>builder()
-            .add("host", "process", "connections", "repl", "storageEngine", "mem")
-            .build();
 
     private final DBCollection nodes;
     private final DBCollection clusterNodes;
@@ -232,11 +225,14 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
     private boolean hasModifiedIdCompoundIndex = true;
 
     public MongoDocumentStore(DB db, DocumentMK.Builder builder) {
-        CommandResult serverStatus = db.command("serverStatus");
-        String version = checkVersion(serverStatus);
+        MongoStatus mongoStatus = builder.getMongoStatus();
+        if (mongoStatus == null) {
+            mongoStatus = new MongoStatus(db);
+        }
+        mongoStatus.checkVersion();
         metadata = ImmutableMap.<String,String>builder()
                 .put("type", "mongo")
-                .put("version", version)
+                .put("version", mongoStatus.getVersion())
                 .build();
 
         this.db = db;
@@ -294,42 +290,9 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
         LOG.info("Connected to MongoDB {} with maxReplicationLagMillis {}, " +
                 "maxDeltaForModTimeIdxSecs {}, disableIndexHint {}, " +
                 "{}, serverStatus {}",
-                version, maxReplicationLagMillis, maxDeltaForModTimeIdxSecs,
+                mongoStatus.getVersion(), maxReplicationLagMillis, maxDeltaForModTimeIdxSecs,
                 disableIndexHint, db.getWriteConcern(),
-                serverDetails(serverStatus));
-    }
-
-    @Nonnull
-    private static String checkVersion(CommandResult serverStatus) {
-        String version = serverStatus.getString("version");
-        Matcher m = Pattern.compile("^(\\d+)\\.(\\d+)\\..*").matcher(version);
-        if (!m.matches()) {
-            throw new IllegalArgumentException("Malformed MongoDB version: " + version);
-        }
-        int major = Integer.parseInt(m.group(1));
-        int minor = Integer.parseInt(m.group(2));
-        if (major > 2) {
-            return version;
-        }
-        if (minor < 6) {
-            String msg = "MongoDB version 2.6.0 or higher required. " +
-                    "Currently connected to a MongoDB with version: " + version;
-            throw new RuntimeException(msg);
-        }
-
-        return version;
-    }
-
-    @Nonnull
-    private static String serverDetails(CommandResult serverStatus) {
-        Map<String, Object> details = Maps.newHashMap();
-        for (String key : SERVER_DETAIL_FIELD_NAMES) {
-            Object value = serverStatus.get(key);
-            if (value != null) {
-                details.put(key, value);
-            }
-        }
-        return details.toString();
+                mongoStatus.getServerDetails());
     }
 
     @Override
@@ -758,6 +721,39 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
         return num;
     }
 
+    @Override
+    public <T extends Document> int remove(Collection<T> collection,
+                                    String indexedProperty, long startValue, long endValue)
+            throws DocumentStoreException {
+        log("remove", collection, indexedProperty, startValue, endValue);
+        int num = 0;
+        DBCollection dbCollection = getDBCollection(collection);
+        long start = PERFLOG.start();
+        try {
+            QueryBuilder queryBuilder = QueryBuilder.start(indexedProperty);
+            queryBuilder.greaterThan(startValue);
+            queryBuilder.lessThan(endValue);
+            try {
+                num = dbCollection.remove(queryBuilder.get()).getN();
+            } catch (Exception e) {
+                throw DocumentStoreException.convert(e, "Remove failed for " + collection + ": " +
+                    indexedProperty + " in (" + startValue + ", " + endValue + ")");
+            } finally {
+                if (collection == Collection.NODES) {
+                    // this method is currently being used only for Journal collection while GC.
+                    // But, to keep sanctity of the API, we need to acknowledge that Nodes collection
+                    // could've been used. But, in this signature, there's no useful way to invalidate
+                    // cache.
+                    // So, we use the hammer for this task
+                    invalidateCache();
+                }
+            }
+        } finally {
+            PERFLOG.end(start, 1, "remove from {}: {} in ({}, {})", collection, indexedProperty, startValue, endValue);
+        }
+        return num;
+    }
+
     @SuppressWarnings("unchecked")
     @CheckForNull
     private <T extends Document> T findAndModify(Collection<T> collection,
@@ -839,7 +835,7 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
             }
             return oldDoc;
         } catch (Exception e) {
-            throw DocumentStoreException.convert(e);
+            throw handleException(e, collection, updateOp.getId());
         } finally {
             if (lock != null) {
                 lock.unlock();
@@ -939,6 +935,14 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
                     results.put(op, oldDoc);
                 }
             }
+        } catch (MongoException e) {
+            throw handleException(e, collection, Iterables.transform(updateOps,
+                    new Function<UpdateOp, String>() {
+                @Override
+                public String apply(UpdateOp input) {
+                    return input.getId();
+                }
+            }));
         } finally {
             stats.doneCreateOrUpdate(watch.elapsed(TimeUnit.NANOSECONDS),
                     collection, Lists.transform(updateOps, new Function<UpdateOp, String>() {
@@ -1108,6 +1112,7 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
         for (int i = 0; i < updateOps.size(); i++) {
             inserts[i] = new BasicDBObject();
             UpdateOp update = updateOps.get(i);
+            inserts[i].put(Document.ID, update.getId());
             UpdateUtils.assertUnconditional(update);
             T target = collection.newDocument(this);
             UpdateUtils.applyChanges(target, update);
@@ -1227,12 +1232,7 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
                     }
                 }
             } catch (MongoException e) {
-                // some documents may still have been updated
-                // invalidate all documents affected by this update call
-                for (String k : keys) {
-                    nodesCache.invalidate(k);
-                }
-                throw DocumentStoreException.convert(e);
+                throw handleException(e, collection, keys);
             }
         } finally {
             stats.doneUpdate(watch.elapsed(TimeUnit.NANOSECONDS), collection, keys.size());
@@ -1506,14 +1506,13 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
 
         // always increment modCount
         updateOp.increment(Document.MOD_COUNT, 1);
+        if (includeId) {
+            setUpdates.append(Document.ID, updateOp.getId());
+        }
 
         // other updates
         for (Entry<Key, Operation> entry : updateOp.getChanges().entrySet()) {
             Key k = entry.getKey();
-            if (!includeId && k.getName().equals(Document.ID)) {
-                // avoid exception "Mod on _id not allowed"
-                continue;
-            }
             Operation op = entry.getValue();
             switch (op.type) {
                 case SET:
@@ -1636,21 +1635,21 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
         final long start = System.currentTimeMillis();
         // assumption here: server returns UTC - ie the returned
         // date object is correctly taking care of time zones.
-        final CommandResult serverStatus = db.command("serverStatus");
-        if (serverStatus == null) {
+        final CommandResult isMaster = db.command("isMaster");
+        if (isMaster == null) {
             // OAK-4107 / OAK-4515 : extra safety
-            LOG.warn("determineServerTimeDifferenceMillis: db.serverStatus returned null - cannot determine time difference - assuming 0ms.");
+            LOG.warn("determineServerTimeDifferenceMillis: db.isMaster returned null - cannot determine time difference - assuming 0ms.");
             return 0;
         }
-        final Date serverLocalTime = serverStatus.getDate("localTime");
+        final Date serverLocalTime = isMaster.getDate("localTime");
         if (serverLocalTime == null) {
             // OAK-4107 / OAK-4515 : looks like this can happen - at least
             // has been seen once on mongo 3.0.9
             // let's handle this gently and issue a log.warn
             // instead of throwing a NPE
-            LOG.warn("determineServerTimeDifferenceMillis: db.serverStatus.localTime returned null - cannot determine time difference - assuming 0ms. "
-                    + "(Result details: server exception=" + serverStatus.getException() + ", server error message=" + serverStatus.getErrorMessage() + ")", 
-                    serverStatus.getException());
+            LOG.warn("determineServerTimeDifferenceMillis: db.isMaster.localTime returned null - cannot determine time difference - assuming 0ms. "
+                    + "(Result details: server exception=" + isMaster.getException() + ", server error message=" + isMaster.getErrorMessage() + ")",
+                    isMaster.getException());
             return 0;
         }
         final long end = System.currentTimeMillis();
@@ -1683,6 +1682,23 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
         if (localChanges != null) {
             localChanges.add(doc.getId(), Revision.getCurrentTimestamp());
         }
+    }
+
+    private <T extends Document> DocumentStoreException handleException(Exception ex,
+                                                                        Collection<T> collection,
+                                                                        Iterable<String> ids) {
+        if (collection == Collection.NODES) {
+            for (String id : ids) {
+                invalidateCache(collection, id);
+            }
+        }
+        return DocumentStoreException.convert(ex);
+    }
+
+    private <T extends Document> DocumentStoreException handleException(Exception ex,
+                                                                        Collection<T> collection,
+                                                                        String id) {
+        return handleException(ex, collection, Collections.singleton(id));
     }
 
     private static class BulkUpdateResult {

@@ -18,6 +18,7 @@ package org.apache.jackrabbit.oak.plugins.document;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -41,6 +42,7 @@ import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Ordering;
 import com.google.common.collect.Queues;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.cache.CacheValue;
@@ -50,6 +52,7 @@ import org.apache.jackrabbit.oak.commons.json.JsopReader;
 import org.apache.jackrabbit.oak.commons.json.JsopTokenizer;
 import org.apache.jackrabbit.oak.commons.json.JsopWriter;
 import org.apache.jackrabbit.oak.plugins.document.memory.MemoryDocumentStore;
+import org.apache.jackrabbit.oak.plugins.document.util.MergeSortedIterators;
 import org.apache.jackrabbit.oak.plugins.document.util.Utils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,7 +64,10 @@ import com.google.common.collect.Sets;
 import static com.google.common.base.Objects.equal;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.collect.ImmutableList.copyOf;
+import static com.google.common.collect.Iterables.concat;
 import static com.google.common.collect.Iterables.filter;
+import static com.google.common.collect.Iterables.mergeSorted;
 import static com.google.common.collect.Iterables.transform;
 import static org.apache.jackrabbit.oak.plugins.document.Collection.NODES;
 import static org.apache.jackrabbit.oak.plugins.document.StableRevisionComparator.REVERSE;
@@ -108,18 +114,12 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
      * A document size threshold after which a split is forced even if
      * {@link #NUM_REVS_THRESHOLD} is not reached.
      */
-    static final int DOC_SIZE_THRESHOLD = 256 * 1024;
+    static final int DOC_SIZE_THRESHOLD = 1024 * 1024;
 
     /**
      * Only split off at least this number of revisions.
      */
     static final int NUM_REVS_THRESHOLD = 100;
-
-    /**
-     * The split ratio. Only split data to an old document when at least
-     * 30% of the data can be moved.
-     */
-    static final float SPLIT_RATIO = 0.3f;
 
     /**
      * Create an intermediate previous document when there are this many
@@ -337,12 +337,12 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
     /**
      * Time at which this object was check for cache consistency
      */
-    private final AtomicLong lastCheckTime = new AtomicLong(System.currentTimeMillis());
+    private final AtomicLong lastCheckTime = new AtomicLong(Revision.getCurrentTimestamp());
 
     private final long creationTime;
 
     NodeDocument(@Nonnull DocumentStore store) {
-        this(store, System.currentTimeMillis());
+        this(store, Revision.getCurrentTimestamp());
     }
 
     /**
@@ -967,7 +967,8 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
                 continue;
             }
             // first check local map, which contains most recent values
-            Value value = getLatestValue(nodeStore, local, readRevision, validRevisions, lastRevs);
+            Value value = getLatestValue(nodeStore, local.entrySet(),
+                    readRevision, validRevisions, lastRevs);
 
             // check if there may be more recent values in a previous document
             if (value != null
@@ -986,8 +987,9 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             }
 
             if (value == null && !getPreviousRanges().isEmpty()) {
-                // check complete revision history
-                value = getLatestValue(nodeStore, getValueMap(key), readRevision, validRevisions, lastRevs);
+                // check revision history
+                value = getLatestValue(nodeStore, getVisibleChanges(key, readRevision),
+                        readRevision, validRevisions, lastRevs);
             }
             String propertyName = Utils.unescapePropertyName(key);
             String v = value != null ? value.value : null;
@@ -1070,10 +1072,10 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
                                     Map<Revision, String> validRevisions,
                                     LastRevs lastRevs) {
         // check local deleted map first
-        Value value = getLatestValue(context, getLocalDeleted(), readRevision, validRevisions, lastRevs);
+        Value value = getLatestValue(context, getLocalDeleted().entrySet(), readRevision, validRevisions, lastRevs);
         if (value == null && !getPreviousRanges().isEmpty()) {
             // need to check complete map
-            value = getLatestValue(context, getDeleted(), readRevision, validRevisions, lastRevs);
+            value = getLatestValue(context, getDeleted().entrySet(), readRevision, validRevisions, lastRevs);
         }
 
         return value != null && "false".equals(value.value) ? value.revision : null;
@@ -1198,17 +1200,16 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
      * @param context the revision context.
      * @param head    the head revision before this document was retrieved from
      *                the document store.
-     * @param isBinaryValue a predicate that returns {@code true} if the given
-     *                      String value is considered a binary; {@code false}
-     *                      otherwise.
+     * @param binarySize a function that returns the binary size of the given
+     *                   JSON property value String.
      * @return the split operations.
      */
     @Nonnull
     public Iterable<UpdateOp> split(@Nonnull RevisionContext context,
                                     @Nonnull RevisionVector head,
-                                    @Nonnull Predicate<String> isBinaryValue) {
+                                    @Nonnull Function<String, Long> binarySize) {
         return SplitOperations.forDocument(this, context, head,
-                isBinaryValue, NUM_REVS_THRESHOLD);
+                binarySize, NUM_REVS_THRESHOLD);
     }
 
     /**
@@ -1309,7 +1310,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
                         return Collections.singleton(prev);
                     }
                 } else {
-                    LOG.warn("Document with previous revisions not found: " + prevId);
+                    previousDocumentNotFound(prevId, revision);
                 }
             }
 
@@ -1426,7 +1427,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
         if (prev != null) {
             return prev;
         } else {
-            LOG.warn("Document with previous revisions not found: " + prevId);
+            previousDocumentNotFound(prevId, rev);
         }
         return null;
     }
@@ -1519,6 +1520,168 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
     }
 
     /**
+     * Returns all changes for the given property that are visible from the
+     * {@code readRevision} vector. The revisions include committed as well as
+     * uncommitted changes. The returned revisions are sorted in reverse order
+     * (newest first).
+     *
+     * @param property the name of the property.
+     * @param readRevision the read revision vector.
+     * @return property changes visible from the given read revision vector.
+     */
+    @Nonnull
+    Iterable<Map.Entry<Revision, String>> getVisibleChanges(@Nonnull final String property,
+                                                            @Nonnull final RevisionVector readRevision) {
+        Predicate<Map.Entry<Revision, String>> p = new Predicate<Map.Entry<Revision, String>>() {
+            @Override
+            public boolean apply(Map.Entry<Revision, String> input) {
+                return !readRevision.isRevisionNewer(input.getKey());
+            }
+        };
+        List<Iterable<Map.Entry<Revision, String>>> changes = Lists.newArrayList();
+        Map<Revision, String> localChanges = getLocalMap(property);
+        if (!localChanges.isEmpty()) {
+            changes.add(filter(localChanges.entrySet(), p));
+        }
+
+        for (Revision r : readRevision) {
+            // collect changes per clusterId
+            collectVisiblePreviousChanges(property, r, changes);
+        }
+
+        if (changes.size() == 1) {
+            return changes.get(0);
+        } else {
+            return mergeSorted(changes, ValueComparator.REVERSE);
+        }
+    }
+
+    /**
+     * Collect changes in previous documents into {@code changes} visible from
+     * the given {@code readRevision} and for the given {@code property}. The
+     * {@code Iterable} added to the {@code changes} list must be in descending
+     * revision order.
+     *
+     * @param property the name of the property.
+     * @param readRevision collect changes for this part of the readRevision.
+     * @param changes where to add the changes to.
+     */
+    private void collectVisiblePreviousChanges(@Nonnull final String property,
+                                               @Nonnull final Revision readRevision,
+                                               @Nonnull final List<Iterable<Entry<Revision, String>>> changes) {
+        List<Iterable<Map.Entry<Revision, String>>> revs = Lists.newArrayList();
+        Revision lowRev = new Revision(Long.MAX_VALUE, 0, readRevision.getClusterId());
+
+        RevisionVector readRV = new RevisionVector(readRevision);
+        List<Range> ranges = Lists.newArrayList();
+        for (Map.Entry<Revision, Range> e : getPreviousRanges().entrySet()) {
+            Range range = e.getValue();
+            if (range.low.getClusterId() != readRevision.getClusterId()
+                    || readRevision.compareRevisionTime(range.low) < 0) {
+                // either clusterId does not match
+                // or range is newer than read revision
+                continue;
+            }
+            // check if it overlaps with previous ranges
+            if (range.high.compareRevisionTime(lowRev) < 0) {
+                // does not overlap
+                if (!ranges.isEmpty()) {
+                    // there are previous ranges
+                    // get and merge sort overlapping ranges
+                    revs.add(changesFor(ranges, readRV, property));
+                    ranges.clear();
+                }
+            }
+            ranges.add(range);
+            lowRev = Utils.min(lowRev, range.low);
+        }
+        if (!ranges.isEmpty()) {
+            // get remaining changes
+            revs.add(changesFor(ranges, readRV, property));
+        }
+
+        if (!revs.isEmpty()) {
+            changes.add(concat(revs));
+        }
+    }
+
+    /**
+     * Get changes of {@code property} for the given list of {@code ranges}
+     * visible from {@code readRev}.
+     *
+     * @param ranges a list of ranges of previous document where to read the
+     *               changes from.
+     * @param readRev get changes visible from this read revision.
+     * @param property the name of the property to read changes.
+     * @return iterable over the changes.
+     */
+    private Iterable<Map.Entry<Revision, String>> changesFor(final List<Range> ranges,
+                                                             final RevisionVector readRev,
+                                                             final String property) {
+        if (ranges.isEmpty()) {
+            return Collections.emptyList();
+        }
+        final Function<Range, Iterable<Map.Entry<Revision, String>>> rangeToChanges =
+                new Function<Range, Iterable<Map.Entry<Revision, String>>>() {
+            @Override
+            public Iterable<Map.Entry<Revision, String>> apply(Range input) {
+                NodeDocument doc = getPreviousDoc(input.high, input);
+                if (doc == null) {
+                    return Collections.emptyList();
+                }
+                return doc.getVisibleChanges(property, readRev);
+            }
+        };
+
+        Iterable<Map.Entry<Revision, String>> changes;
+        if (ranges.size() == 1) {
+            final Range range = ranges.get(0);
+            changes = new Iterable<Entry<Revision, String>>() {
+                @SuppressWarnings("ConstantConditions")
+                @Override
+                public Iterator<Entry<Revision, String>> iterator() {
+                    return rangeToChanges.apply(range).iterator();
+                }
+            };
+        } else {
+            changes = new Iterable<Entry<Revision, String>>() {
+                private List<Range> rangeList = copyOf(ranges);
+                private Iterable<Iterable<Entry<Revision, String>>> changesPerRange
+                        = transform(rangeList, rangeToChanges);
+                @Override
+                public Iterator<Entry<Revision, String>> iterator() {
+                    final Iterator<Iterable<Entry<Revision, String>>> it
+                            = checkNotNull(changesPerRange.iterator());
+                    return new MergeSortedIterators<Entry<Revision, String>>(ValueComparator.REVERSE) {
+                        @Override
+                        public Iterator<Entry<Revision, String>> nextIterator() {
+                            while (it.hasNext()) {
+                                Iterator<Entry<Revision, String>> next = it.next().iterator();
+                                // check if this even has elements
+                                if (next.hasNext()) {
+                                    return next;
+                                }
+                            }
+                            return null;
+                        }
+
+                        @Override
+                        public String description() {
+                            return "Ranges to merge sort: " + rangeList;
+                        }
+                    };
+                }
+            };
+        }
+        return filter(changes, new Predicate<Entry<Revision, String>>() {
+            @Override
+            public boolean apply(Entry<Revision, String> input) {
+                return !readRev.isRevisionNewer(input.getKey());
+            }
+        });
+    }
+
+    /**
      * Returns the local value map for the given key.
      *
      * @param key the key.
@@ -1591,6 +1754,10 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
 
     public static boolean isDeletedEntry(String name) {
         return DELETED.equals(name);
+    }
+
+    public static boolean isLastRevEntry(String name) {
+        return LAST_REV.equals(name);
     }
 
     public static void removeRevision(@Nonnull UpdateOp op,
@@ -1689,6 +1856,32 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
     }
 
     //----------------------------< internal >----------------------------------
+
+    private void previousDocumentNotFound(String prevId, Revision rev) {
+        LOG.warn("Document with previous revisions not found: " + prevId);
+        // main document may be stale, evict it from the cache if it is
+        // older than one minute. We don't want to invalidate a document
+        // too frequently if the document structure is really broken.
+        String path = getMainPath();
+        String id = Utils.getIdFromPath(path);
+        NodeDocument doc = store.getIfCached(NODES, id);
+        long now = Revision.getCurrentTimestamp();
+        while (doc != null
+                && doc.getCreated() + TimeUnit.MINUTES.toMillis(1) < now) {
+            LOG.info("Invalidated cached document {}", id);
+            store.invalidateCache(NODES, id);
+            // also invalidate intermediate docs if there are any matching
+            Iterable<Range> ranges = doc.getPreviousRanges().values();
+            doc = null;
+            for (Range range : ranges) {
+                if (range.includes(rev)) {
+                    id = Utils.getPreviousIdFor(path, range.high, range.height);
+                    doc = store.getIfCached(NODES, id);
+                    break;
+                }
+            }
+        }
+    }
 
     private LastRevs createLastRevs(@Nonnull RevisionVector readRevision,
                                     @Nonnull Map<Revision, String> validRevisions,
@@ -1891,6 +2084,8 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             }
         } else {
             // branch commit (not merged)
+            // read as RevisionVector, even though this should be
+            // a Revision only. See OAK-4840
             RevisionVector branchCommit = RevisionVector.fromString(commitValue);
             if (branchCommit.getBranchRevision().getClusterId() != context.getClusterId()) {
                 // this is an unmerged branch commit from another cluster node,
@@ -1965,11 +2160,11 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
      */
     @CheckForNull
     private Value getLatestValue(@Nonnull RevisionContext context,
-                                 @Nonnull Map<Revision, String> valueMap,
+                                 @Nonnull Iterable<Map.Entry<Revision, String>> valueMap,
                                  @Nonnull RevisionVector readRevision,
                                  @Nonnull Map<Revision, String> validRevisions,
                                  @Nonnull LastRevs lastRevs) {
-        for (Map.Entry<Revision, String> entry : valueMap.entrySet()) {
+        for (Map.Entry<Revision, String> entry : valueMap) {
             Revision propRev = entry.getKey();
             String commitValue = validRevisions.get(propRev);
             if (commitValue == null) {
@@ -2105,11 +2300,15 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
 
         @Override
         public int getMemory() {
-            int size = 114;
+            long size = 114;
             for (String name : childNames) {
-                size += name.length() * 2 + 56;
+                size += (long)name.length() * 2 + 56;
             }
-            return size;
+            if (size > Integer.MAX_VALUE) {
+                LOG.debug("Estimated memory footprint larger than Integer.MAX_VALUE: {}.", size);
+                size = Integer.MAX_VALUE;
+            }
+            return (int) size;
         }
 
         @SuppressWarnings("unchecked")
@@ -2186,6 +2385,26 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
         Value(@Nonnull Revision revision, @Nullable String value) {
             this.revision = checkNotNull(revision);
             this.value = value;
+        }
+    }
+
+    private static final class ValueComparator implements
+            Comparator<Entry<Revision, String>> {
+
+        static final Comparator<Entry<Revision, String>> INSTANCE = new ValueComparator();
+
+        static final Comparator<Entry<Revision, String>> REVERSE = Collections.reverseOrder(INSTANCE);
+
+        private static final Ordering<String> STRING_ORDERING = Ordering.natural().nullsFirst();
+
+        @Override
+        public int compare(Entry<Revision, String> o1,
+                           Entry<Revision, String> o2) {
+            int cmp = StableRevisionComparator.INSTANCE.compare(o1.getKey(), o2.getKey());
+            if (cmp != 0) {
+                return cmp;
+            }
+            return STRING_ORDERING.compare(o1.getValue(), o2.getValue());
         }
     }
 }

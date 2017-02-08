@@ -16,8 +16,6 @@
  */
 package org.apache.jackrabbit.oak.benchmark;
 
-import static java.util.Arrays.asList;
-
 import java.io.File;
 import java.io.PrintStream;
 import java.util.ArrayList;
@@ -25,9 +23,18 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 
+import com.codahale.metrics.ConsoleReporter;
+import com.codahale.metrics.Counting;
+import com.codahale.metrics.Metric;
+import com.codahale.metrics.MetricFilter;
+import com.codahale.metrics.MetricRegistry;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.MoreExecutors;
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
 import joptsimple.OptionSpec;
@@ -35,12 +42,17 @@ import org.apache.commons.io.FileUtils;
 import org.apache.jackrabbit.oak.benchmark.authentication.external.ExternalLoginTest;
 import org.apache.jackrabbit.oak.benchmark.authentication.external.SyncAllExternalUsersTest;
 import org.apache.jackrabbit.oak.benchmark.authentication.external.SyncExternalUsersTest;
+import org.apache.jackrabbit.oak.benchmark.authorization.AceCreationTest;
 import org.apache.jackrabbit.oak.benchmark.wikipedia.WikipediaImport;
 import org.apache.jackrabbit.oak.fixture.JackrabbitRepositoryFixture;
 import org.apache.jackrabbit.oak.fixture.OakFixture;
 import org.apache.jackrabbit.oak.fixture.OakRepositoryFixture;
 import org.apache.jackrabbit.oak.fixture.RepositoryFixture;
+import org.apache.jackrabbit.oak.plugins.metric.MetricStatisticsProvider;
 import org.apache.jackrabbit.oak.spi.xml.ImportBehavior;
+import org.apache.jackrabbit.oak.stats.StatisticsProvider;
+
+import static java.util.Arrays.asList;
 
 public class BenchmarkRunner {
 
@@ -83,6 +95,10 @@ public class BenchmarkRunner {
                 .accepts("luceneIndexOnFS", "Store Lucene index on file system")
                 .withOptionalArg()
                 .ofType(Boolean.class).defaultsTo(false);
+        OptionSpec<Boolean> metrics = parser
+                .accepts("metrics", "Enable Metrics collection")
+                .withOptionalArg()
+                .ofType(Boolean.class).defaultsTo(false);
         OptionSpec<Boolean> withStorage = parser
                 .accepts("storage", "Index storage enabled").withOptionalArg()
                 .ofType(Boolean.class);
@@ -101,6 +117,8 @@ public class BenchmarkRunner {
                         .withOptionalArg().ofType(Long.class).defaultsTo(AbstractLoginTest.NO_CACHE);
         OptionSpec<Integer> numberOfGroups = parser.accepts("numberOfGroups", "Number of groups to create.")
                         .withOptionalArg().ofType(Integer.class).defaultsTo(LoginWithMembershipTest.NUMBER_OF_GROUPS_DEFAULT);
+        OptionSpec<Integer> numberOfInitialAce = parser.accepts("numberOfInitialAce", "Number of ACE to create before running the test.")
+                .withOptionalArg().ofType(Integer.class).defaultsTo(AceCreationTest.NUMBER_OF_INITIAL_ACE_DEFAULT);
         OptionSpec<Boolean> nestedGroups = parser.accepts("nestedGroups", "Use nested groups.")
                         .withOptionalArg().ofType(Boolean.class).defaultsTo(false);
         OptionSpec<Integer> batchSize = parser.accepts("batchSize", "Batch size before persisting operations.")
@@ -135,6 +153,13 @@ public class BenchmarkRunner {
                 .withOptionalArg().ofType(Boolean.class).defaultsTo(Boolean.FALSE);
         OptionSpec<String> autoMembership = parser.accepts("autoMembership", "Ids of those groups a given external identity automatically become member of.")
                 .withOptionalArg().ofType(String.class).withValuesSeparatedBy(',');
+        OptionSpec<Boolean> transientWrites = parser.accepts("transient", "Do not save data.")
+                .withOptionalArg().ofType(Boolean.class)
+                .defaultsTo(Boolean.FALSE);
+        OptionSpec<Integer> mounts = parser.accepts("mounts", "Number of mounts for multiplexing node store.")
+                .withOptionalArg().ofType(Integer.class).defaultsTo(2);
+        OptionSpec<Integer> pathsPerMount = parser.accepts("pathsPerMount", "Number of paths per one mount.")
+                .withOptionalArg().ofType(Integer.class).defaultsTo(1000);
         OptionSpec<String> nonOption = parser.nonOptions();
         OptionSpec help = parser.acceptsAll(asList("h", "?", "help"), "show help").forHelp();
         OptionSet options = parser.parse(args);
@@ -152,13 +177,14 @@ public class BenchmarkRunner {
             }
             uri = "mongodb://" + host.value(options) + ":" + port.value(options) + "/" + db;
         }
+        StatisticsProvider statsProvider = options.has(metrics) ? getStatsProvider() : StatisticsProvider.NOOP;
         int cacheSize = cache.value(options);
         RepositoryFixture[] allFixtures = new RepositoryFixture[] {
                 new JackrabbitRepositoryFixture(base.value(options), cacheSize),
                 OakRepositoryFixture.getMemoryNS(cacheSize * MB),
                 OakRepositoryFixture.getMongo(uri,
                         dropDBAfterTest.value(options), cacheSize * MB),
-                OakRepositoryFixture.getMongoWithFDS(uri,
+                OakRepositoryFixture.getMongoWithDS(uri,
                         dropDBAfterTest.value(options),
                         cacheSize * MB,
                         base.value(options),
@@ -168,17 +194,24 @@ public class BenchmarkRunner {
                         cacheSize * MB),
                 OakRepositoryFixture.getTar(
                         base.value(options), 256, cacheSize, mmap.value(options)),
-                OakRepositoryFixture.getTarWithBlobStore(
-                        base.value(options), 256, cacheSize, mmap.value(options)),
-                OakRepositoryFixture.getSegmentTar(base.value(options), 256, cacheSize, mmap.value(options)),
-                OakRepositoryFixture.getSegmentTarWithBlobStore(base.value(options), 256, cacheSize, mmap.value(options)),
+                OakRepositoryFixture.getTarWithBlobStore(base.value(options), 256, cacheSize,
+                        mmap.value(options), fdsCache.value(options)),
+                OakRepositoryFixture.getSegmentTar(base.value(options), 256, cacheSize,
+                        mmap.value(options)),
+                OakRepositoryFixture.getSegmentTarWithBlobStore(base.value(options), 256, cacheSize,
+                        mmap.value(options), fdsCache.value(options)),
                 OakRepositoryFixture.getRDB(rdbjdbcuri.value(options), rdbjdbcuser.value(options),
                         rdbjdbcpasswd.value(options), rdbjdbctableprefix.value(options), 
-                        dropDBAfterTest.value(options), cacheSize * MB) };
-                OakRepositoryFixture.getRDBWithFDS(rdbjdbcuri.value(options), rdbjdbcuser.value(options),
+                        dropDBAfterTest.value(options), cacheSize * MB),
+                OakRepositoryFixture.getRDBWithDS(rdbjdbcuri.value(options), rdbjdbcuser.value(options),
                         rdbjdbcpasswd.value(options), rdbjdbctableprefix.value(options),
                         dropDBAfterTest.value(options), cacheSize * MB, base.value(options),
-                        fdsCache.value(options));
+                        fdsCache.value(options)),
+                OakRepositoryFixture.getMultiplexing(base.value(options), 256, cacheSize,
+                        mmap.value(options), mounts.value(options), pathsPerMount.value(options)),
+                OakRepositoryFixture.getMultiplexingInMemory(mounts.value(options), pathsPerMount.value(options))
+        };
+
         Benchmark[] allBenchmarks = new Benchmark[] {
             new OrderedIndexQueryOrderedIndexTest(),
             new OrderedIndexQueryStandardIndexTest(),
@@ -306,6 +339,8 @@ public class BenchmarkRunner {
                     randomUser.value(options)),
             new ConcurrentWriteACLTest(itemsToRead.value(options)),
             new ConcurrentEveryoneACLTest(runAsAdmin.value(options), itemsToRead.value(options)),
+            new AceCreationTest(batchSize.value(options), numberOfInitialAce.value(options), transientWrites.value(options)),
+
             ReadManyTest.linear("LinearReadEmpty", 1, ReadManyTest.EMPTY),
             ReadManyTest.linear("LinearReadFiles", 1, ReadManyTest.FILES),
             ReadManyTest.linear("LinearReadNodes", 1, ReadManyTest.NODES),
@@ -395,7 +430,10 @@ public class BenchmarkRunner {
             // benchmarks for oak-auth-external
             new ExternalLoginTest(numberOfUsers.value(options), numberOfGroups.value(options), expiration.value(options), dynamicMembership.value(options), autoMembership.values(options)),
             new SyncAllExternalUsersTest(numberOfUsers.value(options), numberOfGroups.value(options), expiration.value(options), dynamicMembership.value(options), autoMembership.values(options)),
-            new SyncExternalUsersTest(numberOfUsers.value(options), numberOfGroups.value(options), expiration.value(options), dynamicMembership.value(options), autoMembership.values(options), batchSize.value(options))
+            new SyncExternalUsersTest(numberOfUsers.value(options), numberOfGroups.value(options), expiration.value(options), dynamicMembership.value(options), autoMembership.values(options), batchSize.value(options)),
+            new HybridIndexTest(base.value(options), statsProvider),
+            new BundlingNodeTest(),
+            new PersistentCacheTest(statsProvider)
         };
 
         Set<String> argset = Sets.newHashSet(nonOption.values(options));
@@ -403,6 +441,7 @@ public class BenchmarkRunner {
         for (RepositoryFixture fixture : allFixtures) {
             if (argset.remove(fixture.toString())) {
                 fixtures.add(fixture);
+                configure(fixture, statsProvider);
             }
         }
 
@@ -437,8 +476,35 @@ public class BenchmarkRunner {
             if (out != null) {
                 out.close();
             }
+            reportMetrics(statsProvider);
         } else {
             System.err.println("Unknown arguments: " + argset);
+        }
+    }
+
+    private static void reportMetrics(StatisticsProvider statsProvider) {
+        if (statsProvider instanceof MetricStatisticsProvider) {
+            MetricRegistry metricRegistry = ((MetricStatisticsProvider) statsProvider).getRegistry();
+            ConsoleReporter.forRegistry(metricRegistry)
+                    .outputTo(System.out)
+                    .filter(new MetricFilter() {
+                        @Override
+                        public boolean matches(String name, Metric metric) {
+                            if (metric instanceof Counting) {
+                                //Only report non zero metrics
+                                return ((Counting) metric).getCount() > 0;
+                            }
+                            return true;
+                        }
+                    })
+                    .build()
+                    .report();
+        }
+    }
+
+    private static void configure(RepositoryFixture fixture, StatisticsProvider statsProvider) {
+        if (fixture instanceof OakRepositoryFixture) {
+            ((OakRepositoryFixture) fixture).setStatisticsProvider(statsProvider);
         }
     }
 
@@ -449,5 +515,11 @@ public class BenchmarkRunner {
         }
         Collections.sort(tmp);
         return tmp.toString();
+    }
+
+    private static MetricStatisticsProvider getStatsProvider(){
+        ScheduledExecutorService executorService = MoreExecutors.getExitingScheduledExecutorService(
+                (ScheduledThreadPoolExecutor) Executors.newScheduledThreadPool(1));
+        return new MetricStatisticsProvider(null, executorService);
     }
 }

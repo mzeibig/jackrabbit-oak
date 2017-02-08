@@ -56,7 +56,7 @@ import com.google.common.collect.Multiset;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.json.JsonObject;
 import org.apache.jackrabbit.oak.commons.json.JsopTokenizer;
-import org.apache.jackrabbit.oak.segment.file.FileStore.ReadOnlyStore;
+import org.apache.jackrabbit.oak.segment.file.ReadOnlyFileStore;
 
 /**
  * Utility graph for parsing a segment graph.
@@ -153,7 +153,7 @@ public final class SegmentGraph {
      * @throws Exception
      */
     public static void writeSegmentGraph(
-            @Nonnull ReadOnlyStore fileStore,
+            @Nonnull ReadOnlyFileStore fileStore,
             @Nonnull OutputStream out,
             @Nonnull Date epoch,
             @CheckForNull String pattern) throws Exception {
@@ -230,7 +230,7 @@ public final class SegmentGraph {
      */
     @Nonnull
     public static Graph<UUID> parseSegmentGraph(
-            @Nonnull ReadOnlyStore fileStore,
+            @Nonnull ReadOnlyFileStore fileStore,
             @Nonnull Predicate<UUID> filter) throws IOException {
         SegmentNodeState root = checkNotNull(fileStore).getHead();
         HashSet<UUID> roots = newHashSet(root.getRecordId().asUUID());
@@ -248,7 +248,7 @@ public final class SegmentGraph {
      * @param out           stream to write the graph to
      * @throws Exception
      */
-    public static void writeGCGraph(@Nonnull ReadOnlyStore fileStore, @Nonnull OutputStream out)
+    public static void writeGCGraph(@Nonnull ReadOnlyFileStore fileStore, @Nonnull OutputStream out)
             throws Exception {
         PrintWriter writer = new PrintWriter(checkNotNull(out));
         try {
@@ -283,7 +283,7 @@ public final class SegmentGraph {
      * @throws IOException
      */
     @Nonnull
-    public static Graph<String> parseGCGraph(@Nonnull final ReadOnlyStore fileStore)
+    public static Graph<String> parseGCGraph(@Nonnull final ReadOnlyFileStore fileStore)
             throws IOException {
         SegmentNodeState root = checkNotNull(fileStore).getHead();
         HashSet<UUID> roots = newHashSet(root.getRecordId().asUUID());
@@ -317,7 +317,7 @@ public final class SegmentGraph {
      */
     @Nonnull
     public static <T> Graph<T> parseSegmentGraph(
-            @Nonnull final ReadOnlyStore fileStore,
+            @Nonnull final ReadOnlyFileStore fileStore,
             @Nonnull Set<UUID> roots,
             @Nonnull final Predicate<UUID> filter,
             @Nonnull final Function<UUID, T> map) throws IOException {
@@ -538,9 +538,10 @@ public final class SegmentGraph {
                     tokenizer.read('{');
                     infoMap.putAll(JsonObject.create(tokenizer).getProperties());
                 }
-                Segment segment = getSegmentId().getSegment();
+                SegmentId segmentId = getSegmentId();
+                Segment segment = segmentId.getSegment();
                 infoMap.put("size", valueOf(segment.size()));
-                infoMap.put("gc", valueOf(segment.getGcGeneration()));
+                infoMap.put("gc", valueOf(segmentId.getGcGeneration()));
                 return infoMap;
             } catch (SegmentNotFoundException e) {
                 return singletonMap("error", getStackTraceAsString(e));

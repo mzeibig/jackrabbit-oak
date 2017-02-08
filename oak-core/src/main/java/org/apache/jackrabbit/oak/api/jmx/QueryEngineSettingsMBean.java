@@ -16,6 +16,11 @@
  */
 package org.apache.jackrabbit.oak.api.jmx;
 
+import org.apache.jackrabbit.oak.commons.jmx.Description;
+
+import aQute.bnd.annotation.ProviderType;
+
+@ProviderType
 public interface QueryEngineSettingsMBean {
     String TYPE = "QueryEngineSettings";
     
@@ -26,6 +31,8 @@ public interface QueryEngineSettingsMBean {
      * 
      * @return the limit
      */
+    @Description("Get the limit on how many nodes a query may read at most into memory, for " +
+            "\"order by\" and \"distinct\" queries. If this limit is exceeded, the query throws an exception.")    
     long getLimitInMemory();
     
     /**
@@ -42,6 +49,9 @@ public interface QueryEngineSettingsMBean {
      * 
      * @return the limit
      */
+    @Description("Get the limit on how many nodes a query may read at most (raw read " +
+            "operations, including skipped nodes). If this limit is exceeded, the " +
+            "query throws an exception.")    
     long getLimitReads();
     
     /**
@@ -51,4 +61,31 @@ public interface QueryEngineSettingsMBean {
      */
     void setLimitReads(long limitReads);
     
+    /**
+     * Whether queries that don't use an index will fail (throw an exception).
+     * The default is false.
+     * 
+     * @return true if they fail
+     */
+    @Description("Whether queries that don't use an index will fail (throw an exception). " +
+            "The default is false.")    
+    boolean getFailTraversal();
+
+    /**
+     * Set whether queries that don't use an index will fail (throw an exception).
+     * 
+     * @param failTraversal the new value for this setting
+     */
+    void setFailTraversal(boolean failTraversal);
+
+    /**
+     * Whether the query result size should return an estimation for large queries.
+     *
+     * @return true if enabled
+     */
+    @Description("Whether the query result size should return an estimation for large queries.")    
+    boolean isFastQuerySize();
+
+    void setFastQuerySize(boolean fastQuerySize);
+
 }

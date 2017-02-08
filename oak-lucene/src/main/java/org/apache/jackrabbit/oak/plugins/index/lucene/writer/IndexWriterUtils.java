@@ -24,11 +24,15 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 
+import javax.annotation.Nullable;
+
+import org.apache.jackrabbit.oak.plugins.index.lucene.directory.BufferedOakDirectory;
 import org.apache.jackrabbit.oak.plugins.index.lucene.FieldNames;
 import org.apache.jackrabbit.oak.plugins.index.lucene.IndexDefinition;
 import org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants;
 import org.apache.jackrabbit.oak.plugins.index.lucene.OakDirectory;
 import org.apache.jackrabbit.oak.plugins.index.lucene.util.SuggestHelper;
+import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.miscellaneous.PerFieldAnalyzerWrapper;
@@ -70,11 +74,21 @@ public class IndexWriterUtils {
         }
     }
 
-    public static Directory newIndexDirectory(IndexDefinition indexDefinition, NodeBuilder definition, String dirName)
+    public static Directory newIndexDirectory(IndexDefinition indexDefinition,
+            NodeBuilder definition, String dirName, boolean buffered,
+            @Nullable GarbageCollectableBlobStore blobStore)
             throws IOException {
-        String path = definition.getString(PERSISTENCE_PATH);
+        String path = null;
+        if (LuceneIndexConstants.PERSISTENCE_FILE.equalsIgnoreCase(
+                definition.getString(LuceneIndexConstants.PERSISTENCE_NAME))) {
+            path = definition.getString(PERSISTENCE_PATH);
+        }
         if (path == null) {
-            return new OakDirectory(definition, dirName, indexDefinition, false);
+            if (buffered) {
+                return new BufferedOakDirectory(definition, dirName, indexDefinition, blobStore);
+            } else {
+                return new OakDirectory(definition, dirName, indexDefinition, false, blobStore);
+            }
         } else {
             // try {
             File file = new File(path);

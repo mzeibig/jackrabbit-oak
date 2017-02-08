@@ -69,6 +69,41 @@ public class QueryTest extends AbstractRepositoryTest {
     }
     
     @Test
+    public void traversalOption() throws Exception {
+        Session session = getAdminSession();
+        QueryManager qm = session.getWorkspace().getQueryManager();
+        try {
+            qm.createQuery("//*[@test] option(traversal fail)", 
+                    "xpath").execute();
+            fail();
+        } catch (InvalidQueryException e) {
+            // expected
+        }
+        try {
+            qm.createQuery("select * from [nt:base] option(traversal fail)", 
+                    Query.JCR_SQL2).execute();
+            fail();
+        } catch (InvalidQueryException e) {
+            // expected
+        }
+        qm.createQuery("//*[@test] option(traversal ok)", 
+                "xpath").execute();
+        qm.createQuery("//*[@test] option(traversal warn)", 
+                "xpath").execute();
+        qm.createQuery("select * from [nt:base] option(traversal ok)", 
+                Query.JCR_SQL2).execute();
+        qm.createQuery("select * from [nt:base] option(traversal warn)", 
+                Query.JCR_SQL2).execute();
+        // the following is not really traversal, it is just listing child nodes:
+        qm.createQuery("/jcr:root/*[@test] option(traversal fail)", 
+                "xpath").execute();
+        // the following is not really traversal; it is just one node:
+        qm.createQuery("/jcr:root/oak:index[@test] option(traversal fail)", 
+                "xpath").execute();
+
+    }    
+    
+    @Test
     public void firstSelector() throws Exception {
         Session session = getAdminSession();
         Node root = session.getRootNode();
@@ -782,8 +817,26 @@ public class QueryTest extends AbstractRepositoryTest {
     @Test
     public void approxCount() throws Exception {
         Session session = createAdminSession();
-        double c = getCost(session, "//*[@x=1]");
+        session.getNode("/oak:index/counter").setProperty("resolution", 100);
+        session.save();
         // *with* the counter index, the estimated cost to traverse is low
+        // but the counter index is not always up to date, so we need a loop
+        for (int i = 0; i < 100; i++) {
+            double c = getCost(session, "//*[@x=1]");
+            if (c > 0 && c < 100000) {
+                break;
+            }
+            // create a few nodes, in case there are not enough nodes
+            // for the node counter index to be available
+            Node testNode = session.getRootNode().addNode("test" + i);
+            for (int j = 0; j < 100; j++) {
+                testNode.addNode("n" + j);
+            }
+            session.save();
+            // wait for async indexing (the node counter index is async)
+            Thread.sleep(100);
+        }
+        double c = getCost(session, "//*[@x=1]");
         assertTrue("cost: " + c, c > 0 && c < 100000);
         
         // *without* the counter index, the estimated cost to traverse is high
@@ -799,18 +852,37 @@ public class QueryTest extends AbstractRepositoryTest {
     public void nodeType() throws Exception {
         Session session = createAdminSession();
         String xpath = "/jcr:root//element(*,rep:User)[xyz/@jcr:primaryType]";
-        assertTrue(getPlan(session, xpath).startsWith("[rep:User] as [a] /* nodeType"));
+        assertPlan(getPlan(session, xpath), "[rep:User] as [a] /* nodeType");
         
         session.getNode("/oak:index/nodetype").setProperty("declaringNodeTypes", 
                 new String[]{"oak:Unstructured"}, PropertyType.NAME);
         session.save();
 
-        assertTrue(getPlan(session, xpath).startsWith("[rep:User] as [a] /* traverse "));
+        assertPlan(getPlan(session, xpath), "[rep:User] as [a] /* traverse ");
 
-        xpath = "/jcr:root//element(*,oak:Unstructured)[xyz/@jcr:primaryType]";
-        assertTrue(getPlan(session, xpath).startsWith("[oak:Unstructured] as [a] /* nodeType "));
+        xpath = "/jcr:root//element(*,oak:Unstructured)[xyz/@jcr:primaryType] option(traversal fail)";
+        // the plan might still use traversal, so we can't just check the plan;
+        // but using "option(traversal fail)" we have ensured that there is an index
+        // (the nodetype index) that can serve this query
+        getPlan(session, xpath);
 
+        // and without the node type index, it is supposed to fail
+        Node nodeTypeIndex = session.getRootNode().getNode("oak:index").getNode("nodetype");
+        nodeTypeIndex.setProperty("declaringNodeTypes", new String[] {
+            }, PropertyType.NAME);
+        session.save();
+        try {
+            getPlan(session, xpath);
+            fail();
+        } catch (InvalidQueryException e) {
+            // expected
+        }
+        
         session.logout();
+    }
+
+    private static void assertPlan(String plan, String planPrefix) {
+        assertTrue("Unexpected plan: " + plan, plan.startsWith(planPrefix));
     }
     
     private static String getPlan(Session session, String xpath) throws RepositoryException {

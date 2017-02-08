@@ -160,16 +160,17 @@ The default `SyncHandler` implementations are configured via [DefaultSyncConfig]
 | User Dynamic Membership       | `user.dynamicMembership`      | Enabling dynamic membership for external users. |
 | User Path Prefix              | `user.pathPrefix`             | The path prefix used when creating new users. |
 | User property mapping         | `user.propertyMapping`        | List mapping definition of local properties from external ones. eg: 'profile/email=mail'.Use double quotes for fixed values. eg: 'profile/nt:primaryType="nt:unstructured" |
+| Disable missing users         | `user.disableMissing`         | By default, users that no longer exist on the external provider will be locally removed. Set this property to `true` to [disable](https://jackrabbit.apache.org/api/2.8/org/apache/jackrabbit/api/security/user/User.html#disable(java.lang.String)) them instead and have them re-enabled if they become available again. |
 | Group auto membership         | `group.autoMembership`        | List of groups that a synced group is added to automatically |
 | Group Expiration Time         | `group.expirationTime`        | Duration until a synced group expires (eg. '1h 30m' or '1d'). |
 | Group Path Prefix             | `group.pathPrefix`            | The path prefix used when creating new groups. |
 | Group property mapping        | `group.propertyMapping`       | List mapping definition of local properties from external ones. |
 | | | |
 
-#### Configuration of the ExternalPrincipalConfiguration
+#### Configuration of the 'Apache Jackrabbit Oak External PrincipalConfiguration'
 
-Please note that the [ExternalPrincipalConfiguration] comes with a dedicated
-`RepositoryInitializer`, which requires the repository to be (re)initialized
+Please note that the `ExternalPrincipalConfiguration` _("Apache Jackrabbit Oak External PrincipalConfiguration")_ 
+comes with a dedicated `RepositoryInitializer`, which requires the repository to be (re)initialized
 once the module `oak-auth-external` is installed.
 
 The recommended way to assert a proper init, is to add 
@@ -177,7 +178,7 @@ The recommended way to assert a proper init, is to add
 as additional value to the `requiredServicePids` configuration option of the 
 `SecurityProviderRegistration` _("Apache Jackrabbit Oak SecurityProvider")_.
 
-See section [Introduction to Oak Security](../introduction.html) for further details on the `SecurityProviderRegistration`.
+See section [Introduction to Oak Security](../../introduction.html) for further details on the `SecurityProviderRegistration`.
 
 The `ExternalPrincipalConfiguration` defines the following configuration options:
      
@@ -194,7 +195,6 @@ The `ExternalPrincipalConfiguration` defines the following configuration options
 [DefaultSyncedIdentity]: /oak/docs/apidocs/org/apache/jackrabbit/oak/spi/security/authentication/external/basic/DefaultSyncedIdentity.html
 [DefaultSyncHandler]: /oak/docs/apidocs/org/apache/jackrabbit/oak/spi/security/authentication/external/impl/DefaultSyncHandler.html
 [ExternalIdentityRef]: /oak/docs/apidocs/org/apache/jackrabbit/oak/spi/security/authentication/external/ExternalIdentityRef.html
-[ExternalPrincipalConfiguration]: /oak/docs/apidocs/org/apache/jackrabbit/oak/spi/security/authentication/external/impl/principal/ExternalPrincipalConfiguration.html
 [DynamicSyncContext]: /oak/docs/apidocs/org/apache/jackrabbit/oak/spi/security/authentication/external/impl/principal/DynamicSyncContext.html
 [OAK-4101]: https://issues.apache.org/jira/browse/OAK-4101
 [OAK-2687]: https://issues.apache.org/jira/browse/OAK-2687

@@ -31,18 +31,12 @@ import java.util.Set;
 
 import javax.annotation.Nonnull;
 
-import com.google.common.base.Strings;
-import com.google.common.collect.AbstractIterator;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Ordering;
-
 import org.apache.jackrabbit.oak.api.PropertyValue;
-import org.apache.jackrabbit.oak.api.Tree;
-import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.api.Result.SizePrecision;
+import org.apache.jackrabbit.oak.api.Tree;
 import org.apache.jackrabbit.oak.namepath.JcrPathParser;
 import org.apache.jackrabbit.oak.namepath.NamePathMapper;
+import org.apache.jackrabbit.oak.query.QueryOptions.Traversal;
 import org.apache.jackrabbit.oak.query.ast.AndImpl;
 import org.apache.jackrabbit.oak.query.ast.AstVisitorBase;
 import org.apache.jackrabbit.oak.query.ast.BindVariableValueImpl;
@@ -98,6 +92,12 @@ import org.apache.jackrabbit.oak.spi.state.NodeStateUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.common.base.Strings;
+import com.google.common.collect.AbstractIterator;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Ordering;
+
 /**
  * Represents a parsed query.
  */
@@ -140,6 +140,8 @@ public class QueryImpl implements Query {
     public static final String REP_SUGGEST = "rep:suggest()";
 
     private static final Logger LOG = LoggerFactory.getLogger(QueryImpl.class);
+    
+    private boolean potentiallySlowTraversalQueryLogged;
 
     private static final Ordering<QueryIndex> MINIMAL_COST_ORDERING = new Ordering<QueryIndex>() {
         @Override
@@ -161,6 +163,11 @@ public class QueryImpl implements Query {
      * purposes.
      */
     private boolean traversalEnabled = true;
+    
+    /**
+     * The query option to be used for this query.
+     */
+    private QueryOptions queryOptions = new QueryOptions();
 
     private OrderingImpl[] orderings;
     private ColumnImpl[] columns;
@@ -949,6 +956,11 @@ public class QueryImpl implements Query {
         this.traversalEnabled = traversalEnabled;
     }
 
+    @Override
+    public void setQueryOptions(QueryOptions options) {
+        this.queryOptions = options;
+    }
+
     public SelectorExecutionPlan getBestSelectorExecutionPlan(FilterImpl filter) {
         return getBestSelectorExecutionPlan(context.getBaseState(), filter,
                 context.getIndexProvider(), traversalEnabled);
@@ -969,6 +981,7 @@ public class QueryImpl implements Query {
         // current index is below the minimum cost of the next index.
         List<? extends QueryIndex> queryIndexes = MINIMAL_COST_ORDERING
                 .sortedCopy(indexProvider.getQueryIndexes(rootState));
+        List<OrderEntry> sortOrder = getSortOrder(filter); 
         for (int i = 0; i < queryIndexes.size(); i++) {
             QueryIndex index = queryIndexes.get(i);
             double minCost = index.getMinimumCost();
@@ -982,32 +995,6 @@ public class QueryImpl implements Query {
             IndexPlan indexPlan = null;
             if (index instanceof AdvancedQueryIndex) {
                 AdvancedQueryIndex advIndex = (AdvancedQueryIndex) index;
-                List<OrderEntry> sortOrder = null;
-                if (orderings != null) {
-                    sortOrder = new ArrayList<OrderEntry>();
-                    for (OrderingImpl o : orderings) {
-                        DynamicOperandImpl op = o.getOperand();
-                        if (!(op instanceof PropertyValueImpl)) {
-                            // ordered by a function: currently not supported
-                            break;
-                        }
-                        PropertyValueImpl p = (PropertyValueImpl) op;
-                        SelectorImpl s = p.getSelectors().iterator().next();
-                        if (!s.equals(filter.getSelector())) {
-                            // ordered by a different selector
-                            continue;
-                        }
-                        OrderEntry e = new OrderEntry(
-                                p.getPropertyName(), 
-                                Type.UNDEFINED, 
-                                o.isDescending() ? 
-                                OrderEntry.Order.DESCENDING : OrderEntry.Order.ASCENDING);
-                        sortOrder.add(e);
-                    }
-                    if (sortOrder.size() == 0) {
-                        sortOrder = null;
-                    }
-                }
                 long maxEntryCount = limit;
                 if (offset > 0) {
                     if (offset + limit < 0) {
@@ -1048,9 +1035,9 @@ public class QueryImpl implements Query {
                 bestPlan = indexPlan;
             }
         }
-
+        boolean potentiallySlowTraversalQuery = bestIndex == null;
         if (traversalEnabled) {
-            QueryIndex traversal = new TraversingIndex();
+            TraversingIndex traversal = new TraversingIndex();
             double cost = traversal.getCost(filter, rootState);
             if (LOG.isDebugEnabled()) {
                 logDebug("cost for " + traversal.getIndexName() + " is " + cost);
@@ -1059,9 +1046,58 @@ public class QueryImpl implements Query {
                 bestCost = cost;
                 bestPlan = null;
                 bestIndex = traversal;
+                if (potentiallySlowTraversalQuery) {
+                    potentiallySlowTraversalQuery = traversal.isPotentiallySlow(filter, rootState);
+                }
+            }
+        }
+        if (potentiallySlowTraversalQuery) {
+            QueryOptions.Traversal traversal = queryOptions.traversal;
+            if (traversal == Traversal.DEFAULT) {
+                // use the (configured) default
+                traversal = settings.getFailTraversal() ? Traversal.FAIL : Traversal.WARN;
+            } else {
+                // explicitly set in the query
+                traversal = queryOptions.traversal;
+            }
+            String message = "Traversal query (query without index): " + statement + "; consider creating an index";
+            switch (traversal) {
+            case OK:
+                break;
+            case WARN:
+                if (!potentiallySlowTraversalQueryLogged) {
+                    LOG.info(message);
+                    potentiallySlowTraversalQueryLogged = true;
+                }
+                break;
+            case FAIL:
+                if (!potentiallySlowTraversalQueryLogged) {
+                    LOG.warn(message);
+                    potentiallySlowTraversalQueryLogged = true;
+                }
+                throw new IllegalArgumentException(message);
             }
         }
         return new SelectorExecutionPlan(filter.getSelector(), bestIndex, bestPlan, bestCost);
+    }
+    
+    private List<OrderEntry> getSortOrder(FilterImpl filter) {
+        if (orderings == null) {
+            return null;
+        }
+        ArrayList<OrderEntry> sortOrder = new ArrayList<OrderEntry>();
+        for (OrderingImpl o : orderings) {
+            DynamicOperandImpl op = o.getOperand();
+            OrderEntry e = op.getOrderEntry(filter.getSelector(), o);
+            if (e == null) {
+                continue;
+            }
+            sortOrder.add(e);
+        }
+        if (sortOrder.size() == 0) {
+            return null;
+        }
+        return sortOrder;
     }
     
     private void logDebug(String msg) {

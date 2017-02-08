@@ -20,36 +20,21 @@
 package org.apache.jackrabbit.oak.segment.file;
 
 import static com.google.common.base.Preconditions.checkNotNull;
-import static java.text.DateFormat.getDateTimeInstance;
-import static org.apache.jackrabbit.stats.TimeSeriesStatsUtil.asCompositeData;
 import static org.slf4j.helpers.MessageFormatter.arrayFormat;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.util.Date;
 
 import javax.annotation.Nonnull;
-import javax.management.openmbean.CompositeData;
 
-import org.apache.jackrabbit.oak.commons.jmx.AnnotatedStandardMBean;
+import org.apache.jackrabbit.oak.segment.compaction.SegmentGCStatus;
 import org.apache.jackrabbit.oak.spi.gc.GCMonitor;
 import org.apache.jackrabbit.oak.stats.Clock;
-import org.apache.jackrabbit.stats.TimeSeriesRecorder;
 
 /**
- * {@link GCMonitor} implementation providing the file store gc status
- * as {@link GCMonitorMBean}.
- * <p>
- * Users of this class need to schedule a call to {@link #run()} once per
- * second to ensure the various time series maintained by this implementation
- * are correctly aggregated.
+ * {@link GCMonitor} implementation providing the file store gc status.
  */
-public class FileStoreGCMonitor extends AnnotatedStandardMBean
-        implements GCMonitor, GCMonitorMBean, Runnable {
-    private final TimeSeriesRecorder gcCount = new TimeSeriesRecorder(true);
-    private final TimeSeriesRecorder repositorySize = new TimeSeriesRecorder(false);
-    private final TimeSeriesRecorder reclaimedSize = new TimeSeriesRecorder(true);
-
+public class FileStoreGCMonitor implements GCMonitor {
     private final Clock clock;
 
     private long lastCompaction;
@@ -57,32 +42,23 @@ public class FileStoreGCMonitor extends AnnotatedStandardMBean
     private long lastRepositorySize;
     private long lastReclaimedSize;
     private String lastError;
-    private String status = "NA";
+    private String lastLogMessage;
+    private String status = SegmentGCStatus.IDLE.message();
 
     public FileStoreGCMonitor(@Nonnull Clock clock) {
-        super(GCMonitorMBean.class);
         this.clock = checkNotNull(clock);
-    }
-
-    //------------------------------------------------------------< Runnable >---
-
-    @Override
-    public void run() {
-        gcCount.recordOneSecond();
-        repositorySize.recordOneSecond();
-        reclaimedSize.recordOneSecond();
     }
 
     //------------------------------------------------------------< GCMonitor >---
 
     @Override
     public void info(String message, Object... arguments) {
-        status = arrayFormat(message, arguments).getMessage();
+        lastLogMessage = arrayFormat(message, arguments).getMessage();
     }
 
     @Override
     public void warn(String message, Object... arguments) {
-        status = arrayFormat(message, arguments).getMessage();
+        lastLogMessage = arrayFormat(message, arguments).getMessage();
     }
 
     @Override
@@ -95,11 +71,11 @@ public class FileStoreGCMonitor extends AnnotatedStandardMBean
 
     @Override
     public void skipped(String reason, Object... arguments) {
-        status = arrayFormat(reason, arguments).getMessage();
+        lastLogMessage = arrayFormat(reason, arguments).getMessage();
     }
 
     @Override
-    public void compacted(long[] segmentCounts, long[] recordCounts, long[] compactionMapWeights) {
+    public void compacted() {
         lastCompaction = clock.getTime();
     }
 
@@ -108,62 +84,40 @@ public class FileStoreGCMonitor extends AnnotatedStandardMBean
         lastCleanup = clock.getTime();
         lastReclaimedSize = reclaimed;
         lastRepositorySize = current;
-        gcCount.getCounter().addAndGet(1);
-        repositorySize.getCounter().set(current);
-        reclaimedSize.getCounter().addAndGet(reclaimed);
+    }
+    
+    @Override
+    public void updateStatus(String status) {
+        this.status = status;
     }
 
-    //------------------------------------------------------------< GCMonitorMBean >---
-
-    @Override
-    public String getLastCompaction() {
-        return toString(lastCompaction);
+    public long getLastCompaction() {
+        return lastCompaction;
     }
 
-    @Override
-    public String getLastCleanup() {
-        return toString(lastCleanup);
+    public long getLastCleanup() {
+        return lastCleanup;
     }
 
-    @Override
     public long getLastRepositorySize() {
         return lastRepositorySize;
     }
 
-    @Override
     public long getLastReclaimedSize() {
         return lastReclaimedSize;
     }
 
-    private static String toString(long timestamp) {
-        if (timestamp != 0) {
-            return getDateTimeInstance().format(new Date(timestamp));
-        } else {
-            return null;
-        }
-    }
-
-    @Override
     public String getLastError() {
         return lastError;
     }
 
     @Nonnull
-    @Override
+    public String getLastLogMessage() {
+        return lastLogMessage;
+    }
+    
+    @Nonnull
     public String getStatus() {
         return status;
     }
-
-    @Nonnull
-    @Override
-    public CompositeData getRepositorySize() {
-        return asCompositeData(repositorySize, "RepositorySize");
-    }
-
-    @Nonnull
-    @Override
-    public CompositeData getReclaimedSize() {
-        return asCompositeData(reclaimedSize, "ReclaimedSize");
-    }
-
 }

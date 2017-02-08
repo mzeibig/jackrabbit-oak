@@ -18,11 +18,14 @@
  */
 package org.apache.jackrabbit.oak.segment;
 
+import static org.apache.jackrabbit.oak.segment.CacheWeights.OBJECT_HEADER_SIZE;
+
 import java.util.UUID;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
+import org.apache.jackrabbit.oak.commons.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -118,30 +121,27 @@ public class SegmentId implements Comparable<SegmentId> {
             synchronized (this) {
                 segment = this.segment;
                 if (segment == null) {
-                    try {
-                        log.debug("Loading segment {}", this);
-                        segment = store.readSegment(this);
-                        gcGeneration = segment.getGcGeneration();
-                        this.segment = segment;
-                    } catch (SegmentNotFoundException snfe) {
-                        log.error("Segment not found: {}. {}", this, gcInfo(), snfe);
-                        throw snfe;
-                    }
+                    log.debug("Loading segment {}", this);
+                    segment = store.readSegment(this);
                 }
             }
         }
         return segment;
     }
 
+    /**
+     * @return  garbage collection related information like the age of this segment
+     *          id, the generation of its segment and information about its gc status.
+     */
     @Nonnull
-    private String gcInfo() {
+    String gcInfo() {
         StringBuilder sb = new StringBuilder();
         sb.append("SegmentId age=").append(System.currentTimeMillis() - creationTime).append("ms");
         if (gcInfo != null) {
             sb.append(",").append(gcInfo);
         }
         if (gcGeneration >= 0) {
-            sb.append(",").append("segment-generation").append(gcGeneration);
+            sb.append(",").append("segment-generation=").append(gcGeneration);
         }
         return sb.toString();
     }
@@ -172,6 +172,7 @@ public class SegmentId implements Comparable<SegmentId> {
      */
     void loaded(@Nonnull Segment segment) {
         this.segment = segment;
+        this.gcGeneration = segment.getGcGeneration();
     }
 
     /**
@@ -204,10 +205,22 @@ public class SegmentId implements Comparable<SegmentId> {
         return new UUID(msb, lsb);
     }
 
+    /**
+     * Get the underlying segment's gc generation. Might cause the segment to
+     * get loaded if the generation info is missing
+     * @return the segment's gc generation
+     */
+    public int getGcGeneration() {
+        if (gcGeneration < 0) {
+            getSegment();
+        }
+        return gcGeneration;
+    }
+
     // --------------------------------------------------------< Comparable >--
 
     @Override
-    public int compareTo(SegmentId that) {
+    public int compareTo(@Nonnull SegmentId that) {
         int d = Long.valueOf(this.msb).compareTo(that.msb);
         if (d == 0) {
             d = Long.valueOf(this.lsb).compareTo(that.lsb);
@@ -236,6 +249,13 @@ public class SegmentId implements Comparable<SegmentId> {
     @Override
     public int hashCode() {
         return (int) lsb;
+    }
+
+    public int estimateMemoryUsage() {
+        int size = OBJECT_HEADER_SIZE;
+        size += 48; // 6 fields x 8, ignoring 'gcInfo'
+        size += StringUtils.estimateMemoryUsage(gcInfo);
+        return size;
     }
 
 }

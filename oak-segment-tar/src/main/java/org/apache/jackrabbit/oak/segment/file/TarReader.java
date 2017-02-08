@@ -22,7 +22,6 @@ import static com.google.common.base.Charsets.UTF_8;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Lists.newArrayListWithCapacity;
-import static com.google.common.collect.Maps.newHashMap;
 import static com.google.common.collect.Maps.newHashMapWithExpectedSize;
 import static com.google.common.collect.Maps.newLinkedHashMap;
 import static com.google.common.collect.Maps.newTreeMap;
@@ -30,8 +29,6 @@ import static com.google.common.collect.Sets.newHashSet;
 import static com.google.common.collect.Sets.newHashSetWithExpectedSize;
 import static java.nio.ByteBuffer.wrap;
 import static java.util.Collections.singletonList;
-import static org.apache.jackrabbit.oak.segment.Segment.REF_COUNT_OFFSET;
-import static org.apache.jackrabbit.oak.segment.Segment.getGcGeneration;
 import static org.apache.jackrabbit.oak.segment.SegmentId.isDataSegmentId;
 import static org.apache.jackrabbit.oak.segment.file.TarWriter.BINARY_REFERENCES_MAGIC;
 import static org.apache.jackrabbit.oak.segment.file.TarWriter.GRAPH_MAGIC;
@@ -62,6 +59,7 @@ import com.google.common.collect.Sets;
 import org.apache.commons.io.FileUtils;
 import org.apache.jackrabbit.oak.plugins.blob.ReferenceCollector;
 import org.apache.jackrabbit.oak.segment.SegmentGraph.SegmentGraphVisitor;
+import org.apache.jackrabbit.oak.segment.SegmentId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -69,8 +67,6 @@ class TarReader implements Closeable {
 
     /** Logger instance */
     private static final Logger log = LoggerFactory.getLogger(TarReader.class);
-
-    private static final Logger GC_LOG = LoggerFactory.getLogger(TarReader.class.getName() + "-GC");
 
     /** Magic byte sequence at the end of the index block. */
     private static final int INDEX_MAGIC = TarWriter.INDEX_MAGIC;
@@ -90,9 +86,8 @@ class TarReader implements Closeable {
         return BLOCK_SIZE + size + TarWriter.getPaddingSize(size);
     }
 
-    static TarReader open(File file, boolean memoryMapping) throws IOException {
-        TarReader reader = openFirstFileWithValidIndex(
-                singletonList(file), memoryMapping);
+    static TarReader open(File file, boolean memoryMapping, IOMonitor ioMonitor) throws IOException {
+        TarReader reader = openFirstFileWithValidIndex(singletonList(file), memoryMapping, ioMonitor);
         if (reader != null) {
             return reader;
         } else {
@@ -115,15 +110,14 @@ class TarReader implements Closeable {
      * @return
      * @throws IOException
      */
-    static TarReader open(Map<Character, File> files, boolean memoryMapping)
-            throws IOException {
+    static TarReader open(Map<Character, File> files, boolean memoryMapping, TarRecovery recovery, IOMonitor ioMonitor) throws IOException {
         SortedMap<Character, File> sorted = newTreeMap();
         sorted.putAll(files);
 
         List<File> list = newArrayList(sorted.values());
         Collections.reverse(list);
 
-        TarReader reader = openFirstFileWithValidIndex(list, memoryMapping);
+        TarReader reader = openFirstFileWithValidIndex(list, memoryMapping, ioMonitor);
         if (reader != null) {
             return reader;
         }
@@ -137,9 +131,9 @@ class TarReader implements Closeable {
 
         // regenerate the first generation based on the recovered data
         File file = sorted.values().iterator().next();
-        generateTarFile(entries, file);
+        generateTarFile(entries, file, recovery);
 
-        reader = openFirstFileWithValidIndex(singletonList(file), memoryMapping);
+        reader = openFirstFileWithValidIndex(singletonList(file), memoryMapping, ioMonitor);
         if (reader != null) {
             return reader;
         } else {
@@ -147,14 +141,12 @@ class TarReader implements Closeable {
         }
     }
 
-    static TarReader openRO(Map<Character, File> files, boolean memoryMapping,
-            boolean recover) throws IOException {
+    static TarReader openRO(Map<Character, File> files, boolean memoryMapping, boolean recover, TarRecovery recovery, IOMonitor ioMonitor) throws IOException {
         // for readonly store only try the latest generation of a given
         // tar file to prevent any rollback or rewrite
         File file = files.get(Collections.max(files.keySet()));
 
-        TarReader reader = openFirstFileWithValidIndex(singletonList(file),
-                memoryMapping);
+        TarReader reader = openFirstFileWithValidIndex(singletonList(file), memoryMapping, ioMonitor);
         if (reader != null) {
             return reader;
         }
@@ -167,9 +159,8 @@ class TarReader implements Closeable {
             LinkedHashMap<UUID, byte[]> entries = newLinkedHashMap();
             collectFileEntries(file, entries, false);
             file = findAvailGen(file, ".ro.bak");
-            generateTarFile(entries, file);
-            reader = openFirstFileWithValidIndex(singletonList(file),
-                    memoryMapping);
+            generateTarFile(entries, file, recovery);
+            reader = openFirstFileWithValidIndex(singletonList(file), memoryMapping, ioMonitor);
             if (reader != null) {
                 return reader;
             }
@@ -214,20 +205,18 @@ class TarReader implements Closeable {
      * @param file
      * @throws IOException
      */
-    private static void generateTarFile(LinkedHashMap<UUID, byte[]> entries,
-            File file) throws IOException {
+    private static void generateTarFile(LinkedHashMap<UUID, byte[]> entries, File file, TarRecovery recovery) throws IOException {
         log.info("Regenerating tar file {}", file);
-        TarWriter writer = new TarWriter(file);
-        for (Map.Entry<UUID, byte[]> entry : entries.entrySet()) {
-            UUID uuid = entry.getKey();
-            byte[] data = entry.getValue();
-            int generation = getGcGeneration(wrap(data), uuid);
-            writer.writeEntry(
-                    uuid.getMostSignificantBits(),
-                    uuid.getLeastSignificantBits(),
-                    data, 0, data.length, generation);
+
+        try (TarWriter writer = new TarWriter(file)) {
+            for (Entry<UUID, byte[]> entry : entries.entrySet()) {
+                try {
+                    recovery.recoverEntry(entry.getKey(), entry.getValue(), writer);
+                } catch (IOException e) {
+                    throw new IOException(String.format("Unable to recover entry %s for file %s", entry.getKey(), file), e);
+                }
+            }
         }
-        writer.close();
     }
 
     /**
@@ -267,7 +256,7 @@ class TarReader implements Closeable {
         return backup;
     }
 
-    private static TarReader openFirstFileWithValidIndex(List<File> files, boolean memoryMapping) {
+    private static TarReader openFirstFileWithValidIndex(List<File> files, boolean memoryMapping, IOMonitor ioMonitor) {
         for (File file : files) {
             String name = file.getName();
             try {
@@ -293,7 +282,7 @@ class TarReader implements Closeable {
                                 index = mapped.read(
                                         mapped.length() - indexSize - 16 - 1024,
                                         indexSize);
-                                return new TarReader(file, mapped, index);
+                                return new TarReader(file, mapped, index, ioMonitor);
                             } catch (IOException e) {
                                 log.warn("Failed to mmap tar file {}. Falling back to normal file " +
                                         "IO, which will negatively impact repository performance. " +
@@ -309,7 +298,7 @@ class TarReader implements Closeable {
                         // prevent the finally block from closing the file
                         // as the returned TarReader will take care of that
                         access = null;
-                        return new TarReader(file, random, index);
+                        return new TarReader(file, random, index, ioMonitor);
                     }
                 } finally {
                     if (access != null) {
@@ -512,10 +501,13 @@ class TarReader implements Closeable {
 
     private volatile boolean hasGraph;
 
-    private TarReader(File file, FileAccess access, ByteBuffer index) {
+    private final IOMonitor ioMonitor;
+
+    private TarReader(File file, FileAccess access, ByteBuffer index, IOMonitor ioMonitor) {
         this.file = file;
         this.access = access;
         this.index = index;
+        this.ioMonitor = ioMonitor;
     }
 
     long size() {
@@ -580,9 +572,10 @@ class TarReader implements Closeable {
     ByteBuffer readEntry(long msb, long lsb) throws IOException {
         int position = findEntry(msb, lsb);
         if (position != -1) {
-            return access.read(
-                    index.getInt(position + 16),
-                    index.getInt(position + 20));
+            int pos = index.getInt(position + 16);
+            int len = index.getInt(position + 20);
+            ioMonitor.onSegmentRead(file, msb, lsb, len);
+            return access.read(pos, len);
         } else {
             return null;
         }
@@ -658,27 +651,14 @@ class TarReader implements Closeable {
     }
 
     @Nonnull
-    private List<UUID> getReferences(TarEntry entry, UUID id, Map<UUID, List<UUID>> graph) throws IOException {
-        if (graph != null) {
-            List<UUID> uuids = graph.get(id);
-            return uuids == null ? Collections.<UUID>emptyList() : uuids;
-        } else {
-            // a pre-compiled graph is not available, so read the
-            // references directly from this segment
-            ByteBuffer segment = access.read(
-                    entry.offset(),
-                    Math.min(entry.size(), 16 * 256));
-            int pos = segment.position();
-            int refCount = segment.get(pos + REF_COUNT_OFFSET) & 0xff;
-            int refEnd = pos + 16 * (refCount + 1);
-            List<UUID> refIds = newArrayList();
-            for (int refPos = pos + 16; refPos < refEnd; refPos += 16) {
-                refIds.add(new UUID(
-                        segment.getLong(refPos),
-                        segment.getLong(refPos + 8)));
-            }
-            return refIds;
+    private static List<UUID> getReferences(TarEntry entry, UUID id, Map<UUID, List<UUID>> graph) {
+        List<UUID> references = graph.get(id);
+
+        if (references == null) {
+            return Collections.emptyList();
         }
+
+        return references;
     }
 
     /**
@@ -740,7 +720,7 @@ class TarReader implements Closeable {
      * @param collector
      * @param minGeneration
      */
-    void collectBlobReferences(ReferenceCollector collector, int minGeneration) {
+    void collectBlobReferences(@Nonnull ReferenceCollector collector, int minGeneration) {
         Map<Integer, Map<UUID, Set<String>>> generations = getBinaryReferences();
 
         if (generations == null) {
@@ -822,7 +802,7 @@ class TarReader implements Closeable {
         TarEntry[] entries = getEntries();
         for (int i = 0; i < entries.length; i++) {
             TarEntry entry = entries[i];
-            beforeSize += getEntrySize(entry.size());;
+            beforeSize += getEntrySize(entry.size());
             UUID id = new UUID(entry.msb(), entry.lsb());
             if (reclaim.contains(id)) {
                 cleaned.add(id);
@@ -835,7 +815,6 @@ class TarReader implements Closeable {
       
         if (afterCount == 0) {
             log.debug("None of the entries of {} are referenceable.", name);
-            logCleanedSegments(cleaned);
             return null;
         }
         if (afterSize >= beforeSize * 3 / 4 && hasGraph()) {
@@ -867,9 +846,33 @@ class TarReader implements Closeable {
         for (TarEntry entry : entries) {
             if (entry != null) {
                 byte[] data = new byte[entry.size()];
+                ioMonitor.onSegmentRead(file, entry.msb(), entry.lsb(), entry.size());
                 access.read(entry.offset(), entry.size()).get(data);
-                writer.writeEntry(
-                        entry.msb(), entry.lsb(), data, 0, entry.size(), entry.generation());
+                writer.writeEntry(entry.msb(), entry.lsb(), data, 0, entry.size(), entry.generation());
+            }
+        }
+
+        // Reconstruct the graph index for non-cleaned segments.
+
+        Map<UUID, List<UUID>> graph = getGraph(false);
+
+        for (Entry<UUID, List<UUID>> e : graph.entrySet()) {
+            if (cleaned.contains(e.getKey())) {
+                continue;
+            }
+
+            Set<UUID> vertices = newHashSet();
+
+            for (UUID vertex : e.getValue()) {
+                if (cleaned.contains(vertex)) {
+                    continue;
+                }
+
+                vertices.add(vertex);
+            }
+
+            for (UUID vertex : vertices) {
+                writer.addGraphEdge(e.getKey(), vertex);
             }
         }
 
@@ -891,34 +894,14 @@ class TarReader implements Closeable {
 
         writer.close();
 
-        TarReader reader = openFirstFileWithValidIndex(
-                singletonList(newFile), access.isMemoryMapped());
+        TarReader reader = openFirstFileWithValidIndex(singletonList(newFile), access.isMemoryMapped(), ioMonitor);
         if (reader != null) {
-            logCleanedSegments(cleaned);
             reclaimed.addAll(cleaned);
             return reader;
         } else {
             log.warn("Failed to open cleaned up tar file {}", file);
             return this;
         }
-    }
-
-    private void logCleanedSegments(Set<UUID> cleaned) {
-        StringBuilder uuids = new StringBuilder();
-        String newLine = System.getProperty("line.separator", "\n") + "        ";
-
-        int c = 0;
-        String sep = "";
-        for (UUID uuid : cleaned) {
-            uuids.append(sep);
-            if (c++ % 4 == 0) {
-                uuids.append(newLine);
-            }
-            uuids.append(uuid);
-            sep = ", ";
-        }
-
-        GC_LOG.info("TarMK cleaned segments from {}: {}", file.getName(), uuids);
     }
 
     /**
@@ -1038,7 +1021,7 @@ class TarReader implements Closeable {
         return buffer;
     }
 
-    private Map<Integer, Map<UUID, Set<String>>> parseBinaryReferences(ByteBuffer buffer) {
+    private static Map<Integer, Map<UUID, Set<String>>> parseBinaryReferences(ByteBuffer buffer) {
         int nGenerations = buffer.getInt(buffer.limit() - 12);
 
         Map<Integer, Map<UUID, Set<String>>> binaryReferences = newHashMapWithExpectedSize(nGenerations);
@@ -1081,68 +1064,77 @@ class TarReader implements Closeable {
      * @throws IOException if the tar file could not be read
      */
     private ByteBuffer loadGraph() throws IOException {
-        // read the graph metadata just before the tar index entry
         int pos = access.length() - 2 * BLOCK_SIZE - getIndexEntrySize();
+
         ByteBuffer meta = access.read(pos - 16, 16);
+
         int crc32 = meta.getInt();
         int count = meta.getInt();
         int bytes = meta.getInt();
         int magic = meta.getInt();
 
         if (magic != GRAPH_MAGIC) {
-            return null; // magic byte mismatch
+            log.warn("Invalid graph magic number in {}", file);
+            return null;
         }
 
-        if (count < 0 || bytes < count * 16 + 16 || BLOCK_SIZE + bytes > pos) {
-            log.warn("Invalid graph metadata in tar file {}", file);
-            return null; // impossible uuid and/or byte counts
+        if (count < 0) {
+            log.warn("Invalid number of entries in {}", file);
+            return null;
         }
 
-        // this involves seeking backwards in the file, which might not
-        // perform well, but that's OK since we only do this once per file
+        if (bytes < 4 + count * 34) {
+            log.warn("Invalid entry size in {}", file);
+            return null;
+        }
+
         ByteBuffer graph = access.read(pos - bytes, bytes);
 
         byte[] b = new byte[bytes - 16];
+
         graph.mark();
         graph.get(b);
         graph.reset();
 
         CRC32 checksum = new CRC32();
         checksum.update(b);
+
         if (crc32 != (int) checksum.getValue()) {
             log.warn("Invalid graph checksum in tar file {}", file);
-            return null; // checksum mismatch
+            return null;
         }
 
         hasGraph = true;
+
         return graph;
     }
 
-    private static Map<UUID, List<UUID>> parseGraph(ByteBuffer graphByteBuffer, boolean bulkOnly) {
-        int count = graphByteBuffer.getInt(graphByteBuffer.limit() - 12);
+    private static Map<UUID, List<UUID>> parseGraph(ByteBuffer buffer, boolean bulkOnly) {
+        int nEntries = buffer.getInt(buffer.limit() - 12);
 
-        ByteBuffer buffer = graphByteBuffer.duplicate();
-        buffer.limit(graphByteBuffer.limit() - 16);
+        Map<UUID, List<UUID>> graph = newHashMapWithExpectedSize(nEntries);
 
-        List<UUID> uuids = newArrayListWithCapacity(count);
-        for (int i = 0; i < count; i++) {
-            uuids.add(new UUID(buffer.getLong(), buffer.getLong()));
-        }
+        for (int i = 0; i < nEntries; i++) {
+            long msb = buffer.getLong();
+            long lsb = buffer.getLong();
+            int nVertices = buffer.getInt();
 
-        Map<UUID, List<UUID>> graph = newHashMap();
-        while (buffer.hasRemaining()) {
-            UUID uuid = uuids.get(buffer.getInt());
-            List<UUID> list = newArrayList();
-            int refid = buffer.getInt();
-            while (refid != -1) {
-                UUID ref = uuids.get(refid);
-                if (!bulkOnly || !isDataSegmentId(ref.getLeastSignificantBits())) {
-                    list.add(ref);
+            List<UUID> vertices = newArrayListWithCapacity(nVertices);
+
+            for (int j = 0; j < nVertices; j++) {
+                long vmsb = buffer.getLong();
+                long vlsb = buffer.getLong();
+
+                if (bulkOnly && SegmentId.isDataSegmentId(vlsb)) {
+                    continue;
                 }
-                refid = buffer.getInt();
+
+                vertices.add(new UUID(vmsb, vlsb));
             }
-            graph.put(uuid, list);
+
+            graph.put(new UUID(msb, lsb), vertices);
         }
+
         return graph;
     }
 

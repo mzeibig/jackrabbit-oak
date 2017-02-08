@@ -46,7 +46,6 @@ import com.google.common.base.Supplier;
 import org.apache.jackrabbit.oak.segment.RecordId;
 import org.apache.jackrabbit.oak.segment.Revisions;
 import org.apache.jackrabbit.oak.segment.SegmentStore;
-import org.apache.jackrabbit.oak.segment.file.FileStore.ReadOnlyStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -66,14 +65,22 @@ public class TarRevisions implements Revisions, Closeable {
 
     public static final String JOURNAL_FILE_NAME = "journal.log";
 
+    /**
+     * The lock protecting {@link #journalFile}.
+     */
+    private final Lock journalFileLock = new ReentrantLock();
+
     @Nonnull
     private final AtomicReference<RecordId> head;
 
     @Nonnull
     private final File directory;
 
-    @Nonnull
-    private final RandomAccessFile journalFile;
+    /**
+     * The journal file. It is protected by {@link #journalFileLock}. It becomes
+     * {@code null} after it's closed.
+     */
+    private RandomAccessFile journalFile;
 
     /**
      * The persisted head of the root journal, used to determine whether the
@@ -82,10 +89,8 @@ public class TarRevisions implements Revisions, Closeable {
     @Nonnull
     private final AtomicReference<RecordId> persistedHead;
 
-    // FIXME OAK-4015: Expedite commits from the compactor
-    // use a lock that can expedite important commits like compaction and checkpoints.
     @Nonnull
-    private final ReadWriteLock rwLock = new ReentrantReadWriteLock();
+    private final ReadWriteLock rwLock = new ReentrantReadWriteLock(true);
 
     private static class TimeOutOption implements Option {
         private final long time;
@@ -109,6 +114,17 @@ public class TarRevisions implements Revisions, Closeable {
     }
 
     /**
+     * Option to cause set head calls to be expedited. That is, cause them to skip the queue
+     * of any other callers waiting to complete that don't have this option specified.
+     */
+    public static final Option EXPEDITE_OPTION = new Option() {
+        @Override
+        public String toString() {
+            return "Expedite Option";
+        }
+    };
+
+    /**
      * Timeout option approximating no time out ({@code Long.MAX_VALUE} days).
      */
     public static final Option INFINITY = new TimeOutOption(MAX_VALUE, DAYS);
@@ -120,21 +136,16 @@ public class TarRevisions implements Revisions, Closeable {
         return new TimeOutOption(time, unit);
     }
 
-    // FIXME OAK-4465: Remove the read-only concern from TarRevisions: this should be possible once
-    // the ReadOnlyStore is properly separated from the FileStore. See OAK-4450.
     /**
      * Create a new instance placing the journal log file into the passed
      * {@code directory}.
-     * @param readOnly      safeguard for {@link ReadOnlyStore}: open the journal
-     *                      file in read only mode.
      * @param directory     directory of the journal file
      * @throws IOException
      */
-    public TarRevisions(boolean readOnly, @Nonnull File directory)
-    throws IOException {
+    public TarRevisions(@Nonnull File directory) throws IOException {
         this.directory = checkNotNull(directory);
-        this.journalFile = new RandomAccessFile(new File(directory, JOURNAL_FILE_NAME),
-                readOnly ? "r" : "rw");
+        this.journalFile = new RandomAccessFile(new File(directory,
+                JOURNAL_FILE_NAME), "rw");
         this.journalFile.seek(journalFile.length());
         this.head = new AtomicReference<>(null);
         this.persistedHead = new AtomicReference<>(null);
@@ -180,8 +191,6 @@ public class TarRevisions implements Revisions, Closeable {
         checkState(head.get() != null, "Revisions not bound to a store");
     }
 
-    private final Lock flushLock = new ReentrantLock();
-
     /**
      * Flush the id of the current head to the journal after a call to
      * {@code persisted}. This method does nothing and returns immediately if
@@ -192,25 +201,35 @@ public class TarRevisions implements Revisions, Closeable {
      * @throws IOException
      */
     public void flush(@Nonnull Callable<Void> persisted) throws IOException {
-        checkBound();
-        if (flushLock.tryLock()) {
+        if (head.get() == null) {
+            return;
+        }
+        if (journalFileLock.tryLock()) {
             try {
-                RecordId before = persistedHead.get();
-                RecordId after = getHead();
-                if (!after.equals(before)) {
-                    persisted.call();
-
-                    LOG.debug("TarMK journal update {} -> {}", before, after);
-                    journalFile.writeBytes(after.toString10() + " root " + System.currentTimeMillis() + "\n");
-                    journalFile.getChannel().force(false);
-                    persistedHead.set(after);
+                if (journalFile == null) {
+                    return;
                 }
-            } catch (Exception e) {
-                propagateIfInstanceOf(e, IOException.class);
-                propagate(e);
+                doFlush(persisted);
             } finally {
-                flushLock.unlock();
+                journalFileLock.unlock();
             }
+        }
+    }
+
+    private void doFlush(Callable<Void> persisted) throws IOException {
+        try {
+            RecordId before = persistedHead.get();
+            RecordId after = getHead();
+            if (!after.equals(before)) {
+                persisted.call();
+                LOG.debug("TarMK journal update {} -> {}", before, after);
+                journalFile.writeBytes(after.toString10() + " root " + System.currentTimeMillis() + "\n");
+                journalFile.getChannel().force(false);
+                persistedHead.set(after);
+            }
+        } catch (Exception e) {
+            propagateIfInstanceOf(e, IOException.class);
+            propagate(e);
         }
     }
 
@@ -225,8 +244,10 @@ public class TarRevisions implements Revisions, Closeable {
      * This implementation blocks if a concurrent call to
      * {@link #setHead(Function, Option...)} is already in
      * progress.
-
-     * @param options   none
+     *
+     * @param options   zero or one expedite option for expediting this call
+     * @throws IllegalArgumentException  on any non recognised {@code option}.
+     * @see #EXPEDITE_OPTION
      */
     @Override
     public boolean setHead(
@@ -234,12 +255,19 @@ public class TarRevisions implements Revisions, Closeable {
             @Nonnull RecordId head,
             @Nonnull Option... options) {
         checkBound();
-        rwLock.readLock().lock();
+
+        // If the expedite option was specified we acquire the write lock instead of the read lock.
+        // This will cause this thread to get the lock before all threads currently waiting to
+        // enter the read lock. See also the class comment of ReadWriteLock.
+        Lock lock = isExpedited(options)
+            ? rwLock.writeLock()
+            : rwLock.readLock();
+        lock.lock();
         try {
             RecordId id = this.head.get();
             return id.equals(expected) && this.head.compareAndSet(id, head);
         } finally {
-            rwLock.readLock().unlock();
+            lock.unlock();
         }
     }
 
@@ -280,6 +308,16 @@ public class TarRevisions implements Revisions, Closeable {
         }
     }
 
+    private static boolean isExpedited(Option[] options) {
+        if (options.length == 0) {
+            return false;
+        } else if (options.length == 1) {
+            return options[0] == EXPEDITE_OPTION;
+        } else {
+            throw new IllegalArgumentException("Expected zero or one options, got " + options.length);
+        }
+    }
+
     @Nonnull
     private static TimeOutOption getTimeout(@Nonnull Option[] options) {
         if (options.length == 0) {
@@ -297,6 +335,16 @@ public class TarRevisions implements Revisions, Closeable {
      */
     @Override
     public void close() throws IOException {
-        journalFile.close();
+        journalFileLock.lock();
+        try {
+            if (journalFile == null) {
+                return;
+            }
+            journalFile.close();
+            journalFile = null;
+        } finally {
+            journalFileLock.unlock();
+        }
     }
+
 }

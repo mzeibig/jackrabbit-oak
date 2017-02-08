@@ -19,6 +19,7 @@
 package org.apache.jackrabbit.oak.segment.file;
 
 import static com.google.common.base.Charsets.UTF_8;
+import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Maps.newHashMap;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -28,6 +29,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -66,14 +68,14 @@ public class TarFileTest {
 
         assertEquals(5120, file.length());
 
-        TarReader reader = TarReader.open(file, false);
+        TarReader reader = TarReader.open(file, false, new IOMonitorAdapter());
         try {
             assertEquals(ByteBuffer.wrap(data), reader.readEntry(msb, lsb));
         } finally {
             reader.close();
         }
 
-        reader = TarReader.open(file, false);
+        reader = TarReader.open(file, false, new IOMonitorAdapter());
         try {
             assertEquals(ByteBuffer.wrap(data), reader.readEntry(msb, lsb));
         } finally {
@@ -123,7 +125,7 @@ public class TarFileTest {
         expected.put(2, two);
         expected.put(3, three);
 
-        try (TarReader reader = TarReader.open(file, false)) {
+        try (TarReader reader = TarReader.open(file, false, new IOMonitorAdapter())) {
             assertEquals(expected, reader.getBinaryReferences());
         }
     }
@@ -145,7 +147,7 @@ public class TarFileTest {
 
         Set<UUID> sweep = newSet(new UUID(1, 1), new UUID(2, 2));
 
-        try (TarReader reader = TarReader.open(file, false)) {
+        try (TarReader reader = TarReader.open(file, false, new IOMonitorAdapter())) {
             try (TarReader swept = reader.sweep(sweep, new HashSet<UUID>())) {
                 assertNotNull(swept);
 
@@ -160,6 +162,36 @@ public class TarFileTest {
                 references.put(2, two);
 
                 assertEquals(references, swept.getBinaryReferences());
+            }
+        }
+    }
+
+    @Test
+    public void graphShouldBeTrimmedDownOnSweep() throws Exception {
+        try (TarWriter writer = new TarWriter(file)) {
+            writer.writeEntry(1, 1, new byte[] {1}, 0, 1, 1);
+            writer.writeEntry(1, 2, new byte[] {1}, 0, 1, 1);
+            writer.writeEntry(1, 3, new byte[] {1}, 0, 1, 1);
+            writer.writeEntry(2, 1, new byte[] {1}, 0, 1, 2);
+            writer.writeEntry(2, 2, new byte[] {1}, 0, 1, 2);
+            writer.writeEntry(2, 3, new byte[] {1}, 0, 1, 2);
+
+            writer.addGraphEdge(new UUID(1, 1), new UUID(1, 2));
+            writer.addGraphEdge(new UUID(1, 2), new UUID(1, 3));
+            writer.addGraphEdge(new UUID(2, 1), new UUID(2, 2));
+            writer.addGraphEdge(new UUID(2, 2), new UUID(2, 3));
+        }
+
+        Set<UUID> sweep = newSet(new UUID(1, 2), new UUID(2, 3));
+
+        try (TarReader reader = TarReader.open(file, false, new IOMonitorAdapter())) {
+            try (TarReader swept = reader.sweep(sweep, new HashSet<UUID>())) {
+                assertNotNull(swept);
+
+                Map<UUID, List<UUID>> graph = newHashMap();
+                graph.put(new UUID(2, 1), newArrayList(new UUID(2, 2)));
+
+                assertEquals(graph, swept.getGraph(false));
             }
         }
     }

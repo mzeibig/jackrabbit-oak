@@ -18,6 +18,7 @@ package org.apache.jackrabbit.oak.query;
 
 import static org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent.INITIAL_CONTENT;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 
 import java.text.ParseException;
 
@@ -34,13 +35,158 @@ public class XPathTest {
             new NodeStateNodeTypeInfoProvider(INITIAL_CONTENT);
     
     @Test
-    public void test() throws ParseException {
+    public void queryOptions() throws ParseException {
+        verify("//(element(*, nt:address))", 
+                "select [jcr:path], [jcr:score], * " +
+                "from [nt:address] as a " +
+                "/* xpath: //element(*, nt:address) */"); 
+        verify("//(element(*, nt:address) | element(*, nt:folder))", 
+                "select [jcr:path], [jcr:score], * " +
+                "from [nt:address] as a " +
+                "/* xpath: //element(*, nt:address) */ " +
+                "union select [jcr:path], [jcr:score], * " +
+                "from [nt:folder] as a " +
+                "/* xpath: // element(*, nt:folder) */");
+        verify("(//element(*, nt:address) | //element(*, nt:folder))", 
+                "select [jcr:path], [jcr:score], * " +
+                "from [nt:address] as a " +
+                "/* xpath: //element(*, nt:address) */ " +
+                "union select [jcr:path], [jcr:score], * " +
+                "from [nt:folder] as a " +
+                "/* xpath: //element(*, nt:folder) */");
+        verify("/jcr:root/content//*[@a] order by @c option(traversal fail)",
+                "select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where [a] is not null " +
+                "and isdescendantnode(a, '/content') " +
+                "order by [c] option(traversal FAIL) " +
+                "/* xpath: /jcr:root/content//*[@a] " +
+                "order by @c " + 
+                "option(traversal fail) */");            
+        verify("//*[@a or @b] order by @c option(traversal warn)",
+                "select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where [a] is not null " +
+                "union select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where [b] is not null " +
+                "order by [c] option(traversal WARN) " +
+                "/* xpath: //*[@a or @b] " + 
+                "order by @c " + 
+                "option(traversal warn) */");
+        verify("/jcr:root/(content|libs)//*[@a] order by @c option(traversal ok)",
+                "select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where [a] is not null " +
+                "and isdescendantnode(a, '/content') " +
+                "/* xpath: /jcr:root/content//*[@a] " +
+                "order by @c option(traversal ok) */ " +
+                "union select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where [a] is not null " +
+                "and isdescendantnode(a, '/libs') " +
+                "/* xpath: /jcr:root/libs//*[@a] " +
+                "order by @c option(traversal ok) */ " +
+                "order by [c] " + 
+                "option(traversal OK)");            
+    }
+
+    @Test
+    public void chainedConditions() throws ParseException {
+        verify("/jcr:root/x[@a][@b][@c]",
+                "select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where [a] is not null " +
+                "and [b] is not null " +
+                "and [c] is not null " +
+                "and issamenode(a, '/x') " +
+                "/* xpath: /jcr:root/x[@a][@b][@c] */");
+    }
+    
+    @Test
+    public void union() throws ParseException {
+        verify("(//*[@a=1 or @b=1] | //*[@c=1])",
+                "select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where [a] = 1 " +
+                "union select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where [b] = 1 " +
+                "/* xpath: //*[@a=1 or @b=1] */ " +
+                "union select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where [c] = 1 " +
+                "/* xpath: //*[@c=1] */");
+        verify("//(a|(b|c))",
+                "select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where name(a) = 'a' " +
+                "/* xpath: //a */ " +
+                "union select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where name(a) = 'b' " +
+                "/* xpath: //b */ " +
+                "union select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where name(a) = 'c' " +
+                "/* xpath: //c */");
+        verify("(//*[jcr:contains(., 'some')])",
+                "select [jcr:path], [jcr:score], * " + 
+                "from [nt:base] as a " + 
+                "where contains(*, 'some') " + 
+                "/* xpath: //*[jcr:contains(., 'some')] */");
+        verify("(//*[jcr:contains(., 'x')] | //*[jcr:contains(., 'y')])",
+                "select [jcr:path], [jcr:score], * " + 
+                "from [nt:base] as a " + 
+                "where contains(*, 'x') " + 
+                "/* xpath: //*[jcr:contains(., 'x')] */ " + 
+                "union select [jcr:path], [jcr:score], * " + 
+                "from [nt:base] as a " + 
+                "where contains(*, 'y') " + 
+                "/* xpath: //*[jcr:contains(., 'y')] */");
+        try {
+            verify("(/jcr:root/x[@a][@b][@c]","");
+            fail();
+        } catch (ParseException e) {
+            // expected
+        }
+        verify("(/jcr:root/x[@a] | /jcr:root/y[@b])[@c]",
+                "select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where [a] is not null " +
+                "and [c] is not null " +
+                "and issamenode(a, '/x') " +
+                "/* xpath: /jcr:root/x[@a] [@c] */ " +
+                "union select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where [b] is not null " +
+                "and [c] is not null " +
+                "and issamenode(a, '/y') " +
+                "/* xpath: /jcr:root/y[@b][@c] */");
+        verify("(/jcr:root/x | /jcr:root/y)",
+                "select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where issamenode(a, '/x') " +
+                "/* xpath: /jcr:root/x */ " +
+                "union select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where issamenode(a, '/y') " +
+                "/* xpath: /jcr:root/y */");
+        verify("(/jcr:root/x | /jcr:root/y )",
+                "select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where issamenode(a, '/x') " +
+                "/* xpath: /jcr:root/x */ " +
+                "union select [jcr:path], [jcr:score], * " +
+                "from [nt:base] as a " +
+                "where issamenode(a, '/y') " +
+                "/* xpath: /jcr:root/y */");
         verify("(/jcr:root/content//*[@a] | /jcr:root/lib//*[@b]) order by @c",
                 "select [jcr:path], [jcr:score], * " + 
                 "from [nt:base] as a " + 
                 "where [a] is not null " + 
                 "and isdescendantnode(a, '/content') " + 
-                "/* xpath: /jcr:root/content//*[@a] " + 
+                "/* xpath: /jcr:root/content//*[@a]  " + 
                 "order by @c */ " + 
                 "union select [jcr:path], [jcr:score], * " + 
                 "from [nt:base] as a " + 
@@ -121,6 +267,7 @@ public class XPathTest {
         sql = sql.replaceAll(" and ", "\nand ");
         sql = sql.replaceAll(" union ", "\nunion ");
         sql = sql.replaceAll(" order by ", "\norder by ");
+        sql = sql.replaceAll(" option\\(", "\noption\\(");
         sql = sql.replaceAll(" \\/\\* ", "\n/* ");
         return sql;
     }

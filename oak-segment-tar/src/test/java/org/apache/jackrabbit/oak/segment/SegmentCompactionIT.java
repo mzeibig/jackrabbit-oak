@@ -66,6 +66,7 @@ import javax.management.NotCompliantMBeanException;
 import javax.management.ObjectName;
 
 import com.google.common.base.Predicate;
+import com.google.common.base.Supplier;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListenableScheduledFuture;
@@ -82,7 +83,6 @@ import org.apache.jackrabbit.oak.segment.compaction.SegmentRevisionGC;
 import org.apache.jackrabbit.oak.segment.compaction.SegmentRevisionGCMBean;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
 import org.apache.jackrabbit.oak.segment.file.FileStoreGCMonitor;
-import org.apache.jackrabbit.oak.segment.file.GCMonitorMBean;
 import org.apache.jackrabbit.oak.spi.commit.CommitHook;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.CompositeHook;
@@ -90,6 +90,7 @@ import org.apache.jackrabbit.oak.spi.gc.GCMonitor;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
+import org.apache.jackrabbit.oak.spi.state.RevisionGC;
 import org.apache.jackrabbit.oak.spi.whiteboard.CompositeRegistration;
 import org.apache.jackrabbit.oak.spi.whiteboard.Registration;
 import org.apache.jackrabbit.oak.stats.Clock;
@@ -103,13 +104,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * <p>This is a longevity test for SegmentMK compaction for {@code OAK-2849 Improve revision gc on SegmentMK}</p>
+ * <p>This is a longevity test for revision garbage collection.</p>
  *
  * <p>The test schedules a number of readers, writers, a compactor and holds some references for a certain time.
  * All of which can be interactively modified through the accompanying
  * {@link SegmentCompactionITMBean}, the
  * {@link SegmentRevisionGC} and the
- * {@link GCMonitorMBean}.</p>
  *
  *<p>The test is <b>disabled</b> by default, to run it you need to set the {@code SegmentCompactionIT} system property:<br>
  * {@code mvn test -Dtest=SegmentCompactionIT -Dtest.opts.memory=-Xmx4G}
@@ -143,13 +143,12 @@ public class SegmentCompactionIT {
 
     private volatile ListenableFuture<?> compactor = immediateCancelledFuture();
     private volatile ReadWriteLock compactionLock = null;
-    private volatile int lockWaitTime = 60;
     private volatile int maxReaders = 10;
     private volatile int maxWriters = 10;
     private volatile long maxStoreSize = 200000000000L;
     private volatile int maxBlobSize = 1000000;
-    private volatile int maxStringSize = 10000;
-    private volatile int maxReferences = 10;
+    private volatile int maxStringSize = 100;
+    private volatile int maxReferences = 0;
     private volatile int maxWriteOps = 10000;
     private volatile int maxNodeCount = 1000;
     private volatile int maxPropertyCount = 1000;
@@ -157,8 +156,8 @@ public class SegmentCompactionIT {
     private volatile int propertyRemoveRatio = 10;
     private volatile int nodeAddRatio = 40;
     private volatile int addStringRatio = 20;
-    private volatile int addBinaryRatio = 20;
-    private volatile int compactionInterval = 1;
+    private volatile int addBinaryRatio = 0;
+    private volatile int compactionInterval = 2;
     private volatile boolean stopping;
     private volatile Reference rootReference;
     private volatile long fileStoreSize;
@@ -222,15 +221,10 @@ public class SegmentCompactionIT {
     public void setUp() throws Exception {
         assumeTrue(ENABLED);
 
-        scheduler.scheduleAtFixedRate(new Runnable() {
-            @Override
-            public void run() {
-                fileStoreGCMonitor.run();
-            }
-        }, 1, 1, SECONDS);
-
-        SegmentGCOptions gcOptions = defaultGCOptions().setLockWaitTime(lockWaitTime);
         ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+        SegmentGCOptions gcOptions = defaultGCOptions()
+                .setEstimationDisabled(true)
+                .setForceTimeout(3600);
         fileStore = fileStoreBuilder(folder.getRoot())
                 .withMemoryMapping(true)
                 .withGCMonitor(gcMonitor)
@@ -238,14 +232,26 @@ public class SegmentCompactionIT {
                 .withStatisticsProvider(new DefaultStatisticsProvider(executor))
                 .build();
         nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
+        Runnable cancelGC = new Runnable() {
+            @Override
+            public void run() {
+                fileStore.cancelGC();
+            }
+        };
+        Supplier<String> status = new Supplier<String>() {
+            @Override
+            public String get() {
+                return fileStoreGCMonitor.getStatus();
+            }
+        };
 
         List<Registration> registrations = newArrayList();
         registrations.add(registerMBean(segmentCompactionMBean,
                 new ObjectName("IT:TYPE=Segment Compaction")));
-        registrations.add(registerMBean(new SegmentRevisionGCMBean(gcOptions),
+        registrations.add(registerMBean(new SegmentRevisionGCMBean(fileStore, gcOptions, fileStoreGCMonitor),
                 new ObjectName("IT:TYPE=Segment Revision GC")));
-        registrations.add(registerMBean(fileStoreGCMonitor,
-                new ObjectName("IT:TYPE=GC Monitor")));
+        registrations.add(registerMBean(new RevisionGC(fileStore.getGCRunner(), cancelGC, status, executor),
+                new ObjectName("IT:TYPE=Revision GC")));
         CacheStatsMBean segmentCacheStats = fileStore.getSegmentCacheStats();
         registrations.add(registerMBean(segmentCacheStats,
                 new ObjectName("IT:TYPE=" + segmentCacheStats.getName())));
@@ -672,7 +678,7 @@ public class SegmentCompactionIT {
                         @Override
                         public Void call() throws Exception {
                             gcMonitor.resetCleaned();
-                            fileStore.maybeCompact(true);
+                            fileStore.getGCRunner().run();
                             return null;
                         }
                     });
@@ -720,8 +726,8 @@ public class SegmentCompactionIT {
         }
 
         @Override
-        public void compacted(long[] segmentCounts, long[] recordCounts, long[] compactionMapWeights) {
-            delegate.compacted(segmentCounts, recordCounts, compactionMapWeights);
+        public void compacted() {
+            delegate.compacted();
             lastCompacted = System.currentTimeMillis();
         }
 
@@ -729,6 +735,11 @@ public class SegmentCompactionIT {
         public void cleaned(long reclaimedSize, long currentSize) {
             cleaned = true;
             delegate.cleaned(reclaimedSize, currentSize);
+        }
+        
+        @Override
+        public void updateStatus(String status) {
+            delegate.updateStatus(status);
         }
 
         public boolean isCleaned() {
@@ -798,16 +809,6 @@ public class SegmentCompactionIT {
         @Override
         public boolean getUseCompactionLock() {
             return compactionLock != null;
-        }
-
-        @Override
-        public void setLockWaitTime(int seconds) {
-            lockWaitTime = seconds;
-        }
-
-        @Override
-        public int getLockWaitTime() {
-            return lockWaitTime;
         }
 
         @Override

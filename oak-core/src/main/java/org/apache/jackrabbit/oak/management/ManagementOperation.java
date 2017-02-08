@@ -20,6 +20,7 @@
 package org.apache.jackrabbit.oak.management;
 
 import static com.google.common.base.Objects.toStringHelper;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static java.lang.Thread.currentThread;
 import static java.util.concurrent.TimeUnit.DAYS;
 import static java.util.concurrent.TimeUnit.HOURS;
@@ -48,6 +49,7 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import javax.annotation.Nonnull;
 import javax.management.openmbean.CompositeData;
 import javax.management.openmbean.CompositeDataSupport;
 import javax.management.openmbean.CompositeType;
@@ -57,6 +59,8 @@ import javax.management.openmbean.TabularData;
 import javax.management.openmbean.TabularDataSupport;
 import javax.management.openmbean.TabularType;
 
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -73,17 +77,40 @@ public class ManagementOperation<R> extends FutureTask<R> {
     private static final AtomicInteger idGen = new AtomicInteger();
 
     protected final int id;
+
+    @Nonnull
     protected final String name;
 
+    @Nonnull
+    private final Supplier<String> statusMessage;
+
     /**
-     * Create a new {@code ManagementOperation} of the given name. The name
+     * Create a new {@code ManagementOperation} of the given name. The {@code name}
      * is an informal value attached to this instance.
      *
      * @param name  informal name
      * @param task  task to execute for this operation
      */
-    public static <R> ManagementOperation<R> newManagementOperation(String name, Callable<R> task) {
-        return new ManagementOperation<R>(name, task);
+    public static <R> ManagementOperation<R> newManagementOperation(
+            @Nonnull String name,
+            @Nonnull Callable<R> task) {
+        return new ManagementOperation<R>(name, Suppliers.ofInstance(""), task);
+    }
+
+    /**
+     * Create a new {@code ManagementOperation} of the given name. The {@code name}
+     * is an informal value attached to this instance.
+     *
+     * @param name           informal name
+     * @param statusMessage  an informal status message describing the status of the background
+     *                       operation at the time of invocation.
+     * @param task           task to execute for this operation
+     */
+    public static <R> ManagementOperation<R> newManagementOperation(
+            @Nonnull String name,
+            @Nonnull Supplier<String> statusMessage,
+            @Nonnull Callable<R> task) {
+        return new ManagementOperation<R>(name, statusMessage, task);
     }
 
     /**
@@ -93,8 +120,10 @@ public class ManagementOperation<R> extends FutureTask<R> {
      * @param result result returned by the operation
      * @return  a {@code ManagementOperation} instance that is already done.
      */
+    @Nonnull
     public static <R> ManagementOperation<R> done(String name, final R result) {
-        return new ManagementOperation<R>("not started", new Callable<R>() {
+        return new ManagementOperation<R>("done", Suppliers.ofInstance(""),
+                new Callable<R>() {
             @Override
             public R call() throws Exception {
                 return result;
@@ -117,22 +146,27 @@ public class ManagementOperation<R> extends FutureTask<R> {
 
             @Override
             public Status getStatus() {
-                return none(id, name + " not started");
+                return none(this, "NA");
             }
         };
     }
 
     /**
-     * Create a new {@code ManagementOperation} of the given name. The name
+     * Create a new {@code ManagementOperation} of the given name. The {@code name}
      * is an informal value attached to this instance.
-     *
-     * @param name  informal name
-     * @param task  task to execute for this operation
+     * @param name           informal name
+     * @param statusMessage  an informal status message describing the status of the background
+     *                       operation at the time of invocation.
+     * @param task           task to execute for this operation
      */
-    private ManagementOperation(String name, Callable<R> task) {
+    private ManagementOperation(
+            @Nonnull String name,
+            @Nonnull Supplier<String> statusMessage,
+            @Nonnull Callable<R> task) {
         super(task);
         this.id = idGen.incrementAndGet();
-        this.name = name;
+        this.name = checkNotNull(name);
+        this.statusMessage = checkNotNull(statusMessage);
     }
 
     /**
@@ -150,6 +184,7 @@ public class ManagementOperation<R> extends FutureTask<R> {
      * Informal name
      * @return  name of this operation
      */
+    @Nonnull
     public String getName() {
         return name;
     }
@@ -168,21 +203,23 @@ public class ManagementOperation<R> extends FutureTask<R> {
      *
      * @return  the current status of this operation
      */
+    @Nonnull
     public Status getStatus() {
         if (isCancelled()) {
-            return failed(id, name + " cancelled");
+            return failed(this, name + " cancelled");
         } else if (isDone()) {
             try {
-                return succeeded(id, name + " succeeded: " + get());
+                R result = get();
+                return succeeded(this, name + " succeeded" + (result != null ? ": " + result : ""));
             } catch (InterruptedException e) {
                 currentThread().interrupt();
-                return failed(id, name + " status unknown: " + e.getMessage());
+                return failed(this, name + " interrupted: " + e.getMessage());
             } catch (ExecutionException e) {
-                LOG.error(name + " failed", e.getCause());
-                return failed(id, name + " failed: " + e.getCause().getMessage());
+                LOG.error("{} failed", name, e.getCause());
+                return failed(this, name + " failed: " + e.getCause().getMessage());
             }
         } else {
-            return running(id, name + " running");
+            return running(this, name + " running: " + statusMessage.get());
         }
     }
 
@@ -231,51 +268,51 @@ public class ManagementOperation<R> extends FutureTask<R> {
         }
 
         public static Status unavailable(String message) {
-            return unavailable(idGen.incrementAndGet(), message);
+            return new Status(UNAVAILABLE, idGen.incrementAndGet(), message);
         }
 
         public static Status none(String message) {
-            return none(idGen.incrementAndGet(), message);
+            return new Status(NONE, idGen.incrementAndGet(), message);
         }
 
         public static Status initiated(String message) {
-            return initiated(idGen.incrementAndGet(), message);
+            return new Status(INITIATED, idGen.incrementAndGet(), message);
         }
 
         public static Status running(String message) {
-            return running(idGen.incrementAndGet(), message);
+            return new Status(RUNNING, idGen.incrementAndGet(), message);
         }
 
         public static Status succeeded(String message) {
-            return succeeded(idGen.incrementAndGet(), message);
+            return new Status(SUCCEEDED, idGen.incrementAndGet(), message);
         }
 
         public static Status failed(String message) {
-            return failed(idGen.incrementAndGet(), message);
+            return new Status(FAILED, idGen.incrementAndGet(), message);
         }
 
-        static Status unavailable(int id, String message) {
-            return new Status(UNAVAILABLE, id , message);
+        public static Status unavailable(ManagementOperation<?> op, String message) {
+            return new Status(UNAVAILABLE, op.getId() , message);
         }
 
-        static Status none(int id, String message) {
-            return new Status(NONE, id, message);
+        public static Status none(ManagementOperation<?> op, String message) {
+            return new Status(NONE, op.getId(), message);
         }
 
-        static Status initiated(int id, String message) {
-            return new Status(INITIATED, id, message);
+        public static Status initiated(ManagementOperation<?> op, String message) {
+            return new Status(INITIATED, op.getId(), message);
         }
 
-        static Status running(int id, String message) {
-            return new Status(RUNNING, id, message);
+        public static Status running(ManagementOperation<?> op, String message) {
+            return new Status(RUNNING, op.getId(), message);
         }
 
-        static Status succeeded(int id, String message) {
-            return new Status(SUCCEEDED, id, message);
+        public static Status succeeded(ManagementOperation<?> op, String message) {
+            return new Status(SUCCEEDED, op.getId(), message);
         }
 
-        static Status failed(int id, String message) {
-            return new Status(FAILED, id, message);
+        public static Status failed(ManagementOperation<?> op, String message) {
+            return new Status(FAILED, op.getId(), message);
         }
 
         /**

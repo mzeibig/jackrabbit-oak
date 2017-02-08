@@ -20,13 +20,10 @@ package org.apache.jackrabbit.oak.segment.file;
 
 import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Sets.newTreeSet;
-import static org.apache.jackrabbit.oak.commons.FixturesHelper.Fixture.SEGMENT_MK;
-import static org.apache.jackrabbit.oak.commons.FixturesHelper.getFixtures;
 import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assume.assumeTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
@@ -45,8 +42,6 @@ import org.apache.jackrabbit.oak.segment.Segment;
 import org.apache.jackrabbit.oak.segment.SegmentNodeBuilder;
 import org.apache.jackrabbit.oak.segment.SegmentNodeState;
 import org.apache.jackrabbit.oak.segment.SegmentWriter;
-import org.apache.jackrabbit.oak.segment.file.FileStore.ReadOnlyStore;
-import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -58,11 +53,6 @@ public class FileStoreIT {
 
     private File getFileStoreFolder() {
         return folder.getRoot();
-    }
-
-    @BeforeClass
-    public static void assumptions() {
-        assumeTrue(getFixtures().contains(SEGMENT_MK));
     }
 
     @Test
@@ -213,7 +203,7 @@ public class FileStoreIT {
         store.getRevisions().setHead(base.getRecordId(), builder.getNodeState().getRecordId());
         store.flush(); // second 1kB
 
-        ReadOnlyStore ro = null;
+        ReadOnlyFileStore ro = null;
         try {
             ro = fileStoreBuilder(getFileStoreFolder()).buildReadOnly();
             assertEquals(store.getRevisions().getHead(), ro.getRevisions().getHead());
@@ -236,7 +226,7 @@ public class FileStoreIT {
             RecordId id2 = store.getRevisions().getHead();
             store.flush();
 
-            try (ReadOnlyStore roStore = fileStoreBuilder(getFileStoreFolder()).buildReadOnly()) {
+            try (ReadOnlyFileStore roStore = fileStoreBuilder(getFileStoreFolder()).buildReadOnly()) {
                 assertEquals(id2, roStore.getRevisions().getHead());
 
                 roStore.setRevision(id1.toString());

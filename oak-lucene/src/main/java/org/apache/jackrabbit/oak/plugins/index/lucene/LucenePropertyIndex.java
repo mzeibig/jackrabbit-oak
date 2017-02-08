@@ -244,6 +244,9 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
                         plans.add(plan);
                     }
                 }
+            } catch (Exception e) {
+                LOG.error("Error getting plan for {}", path);
+                LOG.error("Exception:", e);
             } finally {
                 if (indexNode != null) {
                     indexNode.release();
@@ -306,13 +309,15 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
             private ScoreDoc lastDoc;
             private int nextBatchSize = LUCENE_QUERY_BATCH_SIZE;
             private boolean noDocs = false;
-            private long lastSearchIndexerVersion;
+            private IndexSearcher indexSearcher;
+            private int indexNodeId = -1;
 
             @Override
             protected LuceneResultRow computeNext() {
                 while (!queue.isEmpty() || loadDocs()) {
                     return queue.remove();
                 }
+                releaseSearcher();
                 return endOfData();
             }
 
@@ -366,7 +371,7 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
                 final IndexNode indexNode = acquireIndexNode(plan);
                 checkState(indexNode != null);
                 try {
-                    IndexSearcher searcher = indexNode.getSearcher();
+                    IndexSearcher searcher = getCurrentSearcher(indexNode);
                     LuceneRequestFacade luceneRequestFacade = getLuceneRequest(plan, augmentorFactory, searcher.getIndexReader());
                     if (luceneRequestFacade.getLuceneRequest() instanceof Query) {
                         Query query = (Query) luceneRequestFacade.getLuceneRequest();
@@ -376,8 +381,6 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
                         if (customScoreQuery != null) {
                             query = customScoreQuery;
                         }
-
-                        checkForIndexVersionChange(searcher);
 
                         TopDocs docs;
                         long start = PERF_LOGGER.start();
@@ -521,15 +524,34 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
                 return !queue.isEmpty();
             }
 
+            private IndexSearcher getCurrentSearcher(IndexNode indexNode) {
+                //The searcher once obtained is held till either cursor is finished
+                //or if the index gets updated. It needs to be ensured that
+                //searcher is obtained via this method only in this iterator
 
-            private void checkForIndexVersionChange(IndexSearcher searcher) {
-                long currentVersion = getVersion(searcher);
-                if (currentVersion != lastSearchIndexerVersion && lastDoc != null) {
+                //Refresh the searcher if change in indexNode is detected
+                //For NRT case its fine to keep a reference to searcher i.e. not
+                //acquire it for every loadDocs call otherwise with frequent change
+                //the reset of lastDoc would happen very frequently.
+                //Upon IndexNode change i.e. when new async index update is detected
+                //the searcher would be refreshed as done earlier
+                if (indexNodeId != indexNode.getIndexNodeId()){
+                    //if already initialized then log about change
+                    if (indexNodeId > 0){
+                        LOG.debug("Change in index version detected. Query would be performed without offset");
+                    }
+
+                    //TODO Add testcase for this scenario
+                    indexSearcher = indexNode.getSearcher();
+                    indexNodeId = indexNode.getIndexNodeId();
                     lastDoc = null;
-                    LOG.debug("Change in index version detected {} => {}. Query would be performed without " +
-                            "offset", currentVersion, lastSearchIndexerVersion);
                 }
-                this.lastSearchIndexerVersion = currentVersion;
+                return indexSearcher;
+            }
+
+            private void releaseSearcher() {
+                //For now nullifying it.
+                indexSearcher =  null;
             }
         };
         SizeEstimator sizeEstimator = new SizeEstimator() {
@@ -676,17 +698,16 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
             return null;
         }
 
+        sortOrder = removeNativeSort(sortOrder);
         List<SortField> fieldsList = newArrayListWithCapacity(sortOrder.size());
         PlanResult planResult = getPlanResult(plan);
         for (int i = 0; i < sortOrder.size(); i++) {
             OrderEntry oe = sortOrder.get(i);
-            if (!isNativeSort(oe)) {
-                PropertyDefinition pd = planResult.getOrderedProperty(i);
-                boolean reverse = oe.getOrder() != OrderEntry.Order.ASCENDING;
-                String propName = oe.getPropertyName();
-                propName = FieldNames.createDocValFieldName(propName);
-                fieldsList.add(new SortField(propName, toLuceneSortType(oe, pd), reverse));
-            }
+            PropertyDefinition pd = planResult.getOrderedProperty(i);
+            boolean reverse = oe.getOrder() != OrderEntry.Order.ASCENDING;
+            String propName = oe.getPropertyName();
+            propName = FieldNames.createDocValFieldName(propName);
+            fieldsList.add(new SortField(propName, toLuceneSortType(oe, pd), reverse));
         }
 
         if (fieldsList.isEmpty()) {
@@ -694,6 +715,25 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
         } else {
             return new Sort(fieldsList.toArray(new SortField[0]));
         }
+    }
+    
+    /**
+     * Remove all "jcr:score" entries.
+     * 
+     * @param original the original list (is not modified)
+     * @return the list with the entries removed
+     */
+    private static List<OrderEntry> removeNativeSort(List<OrderEntry> original) {
+        if (original == null || original.isEmpty()) {
+            return original;
+        }
+        ArrayList<OrderEntry> result = new ArrayList<OrderEntry>();
+        for(OrderEntry oe : original) {
+            if (!isNativeSort(oe)) {
+                result.add(oe);
+            }
+        }
+        return result;
     }
 
     /**
@@ -795,17 +835,15 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
             //This case indicates that query just had order by and no
             //property restriction defined. In this case property
             //existence queries for each sort entry
-            List<OrderEntry> orders = plan.getSortOrder();
+            List<OrderEntry> orders = removeNativeSort(plan.getSortOrder());
             for (int i = 0; i < orders.size(); i++) {
                 OrderEntry oe = orders.get(i);
-                if (!isNativeSort(oe)) {
-                    PropertyDefinition pd = planResult.getOrderedProperty(i);
-                    PropertyRestriction orderRest = new PropertyRestriction();
-                    orderRest.propertyName = oe.getPropertyName();
-                    Query q = createQuery(orderRest, pd);
-                    if (q != null) {
-                        qs.add(q);
-                    }
+                PropertyDefinition pd = planResult.getOrderedProperty(i);
+                PropertyRestriction orderRest = new PropertyRestriction();
+                orderRest.propertyName = oe.getPropertyName();
+                Query q = createQuery(orderRest, pd);
+                if (q != null) {
+                    qs.add(q);
                 }
             }
         }
@@ -1521,6 +1559,7 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
         LuceneResultRow currentRow;
         private final SizeEstimator sizeEstimator;
         private long estimatedSize;
+        private int numberOfFacets;
 
         LucenePathCursor(final Iterator<LuceneResultRow> it, final IndexPlan plan, QueryEngineSettings settings, SizeEstimator sizeEstimator) {
             pathPrefix = plan.getPathPrefix();
@@ -1544,7 +1583,10 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
                 }
 
             };
-            pathCursor = new PathCursor(pathIterator, getPlanResult(plan).isUniquePathsRequired(), settings);
+
+            PlanResult planResult = getPlanResult(plan);
+            pathCursor = new PathCursor(pathIterator, planResult.isUniquePathsRequired(), settings);
+            numberOfFacets = planResult.indexDefinition.getNumberOfTopFacets();
         }
 
 
@@ -1602,7 +1644,7 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
                         Facets facets = currentRow.facets;
                         try {
                             if (facets != null) {
-                                FacetResult topChildren = facets.getTopChildren(10, facetFieldName);
+                                FacetResult topChildren = facets.getTopChildren(numberOfFacets, facetFieldName);
                                 if (topChildren != null) {
                                     JsopWriter writer = new JsopBuilder();
                                     writer.object();

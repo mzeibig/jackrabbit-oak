@@ -32,8 +32,8 @@ import static com.google.common.collect.Lists.newArrayListWithExpectedSize;
 import static com.google.common.collect.Lists.partition;
 import static com.google.common.collect.Maps.newHashMap;
 import static com.google.common.io.ByteStreams.read;
-import static java.lang.Integer.getInteger;
-import static java.lang.System.nanoTime;
+import static java.lang.Long.numberOfLeadingZeros;
+import static java.lang.Math.min;
 import static java.util.Arrays.asList;
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.nCopies;
@@ -62,14 +62,13 @@ import javax.jcr.PropertyType;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.io.Closeables;
-import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics;
-import org.apache.commons.math3.stat.descriptive.SynchronizedDescriptiveStatistics;
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.api.jmx.CacheStatsMBean;
 import org.apache.jackrabbit.oak.plugins.memory.ModifiedNodeState;
 import org.apache.jackrabbit.oak.segment.WriteOperationHandler.WriteOperation;
+import org.apache.jackrabbit.oak.segment.file.GCNodeWriteMonitor;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.DefaultNodeStateDiff;
@@ -85,14 +84,6 @@ import org.slf4j.LoggerFactory;
  */
 public class SegmentWriter {
     private static final Logger LOG = LoggerFactory.getLogger(SegmentWriter.class);
-
-    /**
-     * Size of the window for collecting statistics about the time it takes to
-     * write / compact nodes.
-     * @see DescriptiveStatistics#setWindowSize(int)
-     */
-    private static final int NODE_WRITER_STATS_WINDOW = getInteger(
-            "oak.tar.nodeWriterStatsWindow", 10000);
 
     static final int BLOCK_SIZE = 1 << 12; // 4kB
 
@@ -112,15 +103,7 @@ public class SegmentWriter {
     private final WriteOperationHandler writeOperationHandler;
 
     @Nonnull
-    private final BinaryReferenceConsumer binaryReferenceConsumer;
-
-    @Nonnull
-    private final SynchronizedDescriptiveStatistics nodeCompactTimeStats =
-            new SynchronizedDescriptiveStatistics(NODE_WRITER_STATS_WINDOW);
-
-    @Nonnull
-    private final SynchronizedDescriptiveStatistics nodeWriteTimeStats =
-            new SynchronizedDescriptiveStatistics(NODE_WRITER_STATS_WINDOW);
+    private GCNodeWriteMonitor compactionMonitor = GCNodeWriteMonitor.EMPTY;
 
     /**
      * Create a new instance of a {@code SegmentWriter}. Note the thread safety properties
@@ -132,41 +115,28 @@ public class SegmentWriter {
      * @param cacheManager  cache manager instance for the de-duplication caches used by this writer
      * @param writeOperationHandler  handler for write operations.
      */
-    public SegmentWriter(@Nonnull SegmentStore store,
-                         @Nonnull SegmentReader reader,
-                         @Nullable BlobStore blobStore,
-                         @Nonnull WriterCacheManager cacheManager,
-            @Nonnull WriteOperationHandler writeOperationHandler,
-            @Nonnull BinaryReferenceConsumer binaryReferenceConsumer
+    public SegmentWriter(
+            @Nonnull SegmentStore store,
+            @Nonnull SegmentReader reader,
+            @Nullable BlobStore blobStore,
+            @Nonnull WriterCacheManager cacheManager,
+            @Nonnull WriteOperationHandler writeOperationHandler
     ) {
         this.store = checkNotNull(store);
         this.reader = checkNotNull(reader);
         this.blobStore = blobStore;
         this.cacheManager = checkNotNull(cacheManager);
         this.writeOperationHandler = checkNotNull(writeOperationHandler);
-        this.binaryReferenceConsumer = checkNotNull(binaryReferenceConsumer);
     }
 
     /**
-     * @return  Statistics for node compaction times (in ns). These statistics
-     * include explicit compactions triggered by the file store and implicit
-     * compactions triggered by references to older generations.
-     * The statistics are collected with a window size defined by {@link #NODE_WRITER_STATS_WINDOW}
-     * @see #getNodeWriteTimeStats()
+     * Get occupancy information for the node deduplication cache indicating occupancy and
+     * evictions per priority.
+     * @return  occupancy information for the node deduplication cache.
      */
-    @Nonnull
-    public DescriptiveStatistics getNodeCompactTimeStats() {
-        return nodeCompactTimeStats;
-    }
-
-    /**
-     * @return  Statistics for node write times (in ns).
-     * The statistics are collected with a window size defined by {@link #NODE_WRITER_STATS_WINDOW}
-     * @see #getNodeCompactTimeStats()
-     */
-    @Nonnull
-    public DescriptiveStatistics getNodeWriteTimeStats() {
-        return nodeWriteTimeStats;
+    @CheckForNull
+    public String getNodeCacheOccupancyInfo() {
+        return cacheManager.getNodeCacheOccupancyInfo();
     }
 
     public void flush() throws IOException {
@@ -210,8 +180,9 @@ public class SegmentWriter {
                               @Nonnull final Map<String, RecordId> changes)
     throws IOException {
         RecordId mapId = writeOperationHandler.execute(new SegmentWriteOperation() {
+            @Nonnull
             @Override
-            public RecordId execute(SegmentBufferWriter writer) throws IOException {
+            public RecordId execute(@Nonnull SegmentBufferWriter writer) throws IOException {
                 return with(writer).writeMap(base, changes);
             }
         });
@@ -227,8 +198,9 @@ public class SegmentWriter {
     @Nonnull
     public RecordId writeList(@Nonnull final List<RecordId> list) throws IOException {
         return writeOperationHandler.execute(new SegmentWriteOperation() {
+            @Nonnull
             @Override
-            public RecordId execute(SegmentBufferWriter writer) throws IOException {
+            public RecordId execute(@Nonnull SegmentBufferWriter writer) throws IOException {
                 return with(writer).writeList(list);
             }
         });
@@ -243,8 +215,9 @@ public class SegmentWriter {
     @Nonnull
     public RecordId writeString(@Nonnull final String string) throws IOException {
         return writeOperationHandler.execute(new SegmentWriteOperation() {
+            @Nonnull
             @Override
-            public RecordId execute(SegmentBufferWriter writer) throws IOException {
+            public RecordId execute(@Nonnull SegmentBufferWriter writer) throws IOException {
                 return with(writer).writeString(string);
             }
         });
@@ -259,8 +232,9 @@ public class SegmentWriter {
     @Nonnull
     public SegmentBlob writeBlob(@Nonnull final Blob blob) throws IOException {
         RecordId blobId = writeOperationHandler.execute(new SegmentWriteOperation() {
+            @Nonnull
             @Override
-            public RecordId execute(SegmentBufferWriter writer) throws IOException {
+            public RecordId execute(@Nonnull SegmentBufferWriter writer) throws IOException {
                 return with(writer).writeBlob(blob);
             }
         });
@@ -279,8 +253,9 @@ public class SegmentWriter {
     public RecordId writeBlock(@Nonnull final byte[] bytes, final int offset, final int length)
     throws IOException {
         return writeOperationHandler.execute(new SegmentWriteOperation() {
+            @Nonnull
             @Override
-            public RecordId execute(SegmentBufferWriter writer) throws IOException {
+            public RecordId execute(@Nonnull SegmentBufferWriter writer) throws IOException {
                 return with(writer).writeBlock(bytes, offset, length);
             }
         });
@@ -297,8 +272,9 @@ public class SegmentWriter {
     @Nonnull
     public SegmentBlob writeStream(@Nonnull final InputStream stream) throws IOException {
         RecordId blobId = writeOperationHandler.execute(new SegmentWriteOperation() {
+            @Nonnull
             @Override
-            public RecordId execute(SegmentBufferWriter writer) throws IOException {
+            public RecordId execute(@Nonnull SegmentBufferWriter writer) throws IOException {
                 return with(writer).writeStream(stream);
             }
         });
@@ -315,8 +291,9 @@ public class SegmentWriter {
     public SegmentPropertyState writeProperty(@Nonnull final PropertyState state)
     throws IOException {
         RecordId id = writeOperationHandler.execute(new SegmentWriteOperation() {
+            @Nonnull
             @Override
-            public RecordId execute(SegmentBufferWriter writer) throws IOException {
+            public RecordId execute(@Nonnull SegmentBufferWriter writer) throws IOException {
                 return with(writer).writeProperty(state);
             }
         });
@@ -324,7 +301,14 @@ public class SegmentWriter {
     }
 
     /**
-     * Write a node state
+     * Write a node state.
+     * <p>
+     * <em>Note:</em> the returned {@code SegmentNodeState} instance is bound to this
+     * {@code SegmentWriter} instance. That is, future calls to {@code #builder()}
+     * return a {@code NodeBuilder} that is also bound to the same {@code SegmentWriter}
+     * instance and uses it for writing any changes. This might not always be desired
+     * and callers of this method need to take care not to proliferate this writer
+     * through the returned node states beyond the intended bounds.
      * @param state node state to write
      * @return segment node state equal to {@code state}
      * @throws IOException
@@ -332,8 +316,9 @@ public class SegmentWriter {
     @Nonnull
     public SegmentNodeState writeNode(@Nonnull final NodeState state) throws IOException {
         RecordId nodeId = writeOperationHandler.execute(new SegmentWriteOperation() {
+            @Nonnull
             @Override
-            public RecordId execute(SegmentBufferWriter writer) throws IOException {
+            public RecordId execute(@Nonnull SegmentBufferWriter writer) throws IOException {
                 return with(writer).writeNode(state);
             }
         });
@@ -341,29 +326,30 @@ public class SegmentWriter {
     }
 
     /**
-     * Write a node state, unless cancelled using a dedicated write operation handler.
-     * The write operation handler is automatically {@link WriteOperationHandler#flush() flushed}
-     * once the node has been written successfully.
+     * Write a node state, unless cancelled.
+     * <p>
+     * <em>Note:</em> the returned {@code SegmentNodeState} instance is bound to this
+     * {@code SegmentWriter} instance. That is, future calls to {@code #builder()}
+     * return a {@code NodeBuilder} that is also bound to the same {@code SegmentWriter}
+     * instance and uses it for writing any changes. This might not always be desired
+     * and callers of this method need to take care not to proliferate this writer
+     * through the returned node states beyond the intended bounds.
      * @param state   node state to write
-     * @param writeOperationHandler  the write operation handler through which all write calls
-     *                               induced by by this call are routed.
      * @param cancel  supplier to signal cancellation of this write operation
      * @return segment node state equal to {@code state} or {@code null} if cancelled.
      * @throws IOException
      */
     @CheckForNull
-    public SegmentNodeState writeNode(@Nonnull final NodeState state,
-                                      @Nonnull WriteOperationHandler writeOperationHandler,
-                                      @Nonnull Supplier<Boolean> cancel)
+    public SegmentNodeState writeNode(@Nonnull final NodeState state, @Nonnull Supplier<Boolean> cancel)
     throws IOException {
         try {
             RecordId nodeId = writeOperationHandler.execute(new SegmentWriteOperation(cancel) {
+                @Nonnull
                 @Override
-                public RecordId execute(SegmentBufferWriter writer) throws IOException {
+                public RecordId execute(@Nonnull SegmentBufferWriter writer) throws IOException {
                     return with(writer).writeNode(state);
                 }
             });
-            writeOperationHandler.flush();
             return new SegmentNodeState(reader, this, nodeId);
         } catch (SegmentWriteOperation.CancelledWriteException ignore) {
             return null;
@@ -378,8 +364,6 @@ public class SegmentWriter {
      */
     private abstract class SegmentWriteOperation implements WriteOperation {
         private class NodeWriteStats {
-            private final long startTime = nanoTime();
-
             /*
              * Total number of nodes in the subtree rooted at the node passed
              * to {@link #writeNode(SegmentWriteOperation, SegmentBufferWriter, NodeState)}
@@ -456,8 +440,9 @@ public class SegmentWriter {
             this(Suppliers.ofInstance(false));
         }
 
+        @Nonnull
         @Override
-        public abstract RecordId execute(SegmentBufferWriter writer) throws IOException;
+        public abstract RecordId execute(@Nonnull SegmentBufferWriter writer) throws IOException;
 
         @Nonnull
         SegmentWriteOperation with(@Nonnull SegmentBufferWriter writer) {
@@ -475,12 +460,12 @@ public class SegmentWriter {
         throws IOException {
             if (base != null && base.isDiff()) {
                 Segment segment = base.getSegment();
-                RecordId key = segment.readRecordId(base.getOffset(8));
+                RecordId key = segment.readRecordId(base.getRecordNumber(), 8);
                 String name = reader.readString(key);
                 if (!changes.containsKey(name)) {
-                    changes.put(name, segment.readRecordId(base.getOffset(8, 1)));
+                    changes.put(name, segment.readRecordId(base.getRecordNumber(), 8, 1));
                 }
-                base = new MapRecord(reader, segment.readRecordId(base.getOffset(8, 2)));
+                base = new MapRecord(reader, segment.readRecordId(base.getRecordNumber(), 8, 2));
             }
 
             if (base != null && changes.size() == 1) {
@@ -727,7 +712,7 @@ public class SegmentWriter {
 
             // inline the remaining data as block records
             while (pos < data.length) {
-                int len = Math.min(BLOCK_SIZE, data.length - pos);
+                int len = min(BLOCK_SIZE, data.length - pos);
                 blockIds.add(writeBlock(data, pos, len));
                 pos += len;
             }
@@ -789,10 +774,9 @@ public class SegmentWriter {
             if (data.length < Segment.BLOB_ID_SMALL_LIMIT) {
                 recordId = RecordWriters.newBlobIdWriter(data).write(writer);
             } else {
-                recordId = RecordWriters.newBlobIdWriter(writeString(blobId)).write(writer);
+                RecordId refId = writeString(blobId);
+                recordId = RecordWriters.newBlobIdWriter(refId).write(writer);
             }
-
-            binaryReferenceConsumer.consume(writer.getGeneration(), recordId.asUUID(), blobId);
 
             return recordId;
         }
@@ -854,12 +838,11 @@ public class SegmentWriter {
             // Write the data to bulk segments and collect the list of block ids
             while (n != 0) {
                 SegmentId bulkId = store.newBulkSegmentId();
-                int len = Segment.align(n, 1 << Segment.RECORD_ALIGN_BITS);
                 LOG.debug("Writing bulk segment {} ({} bytes)", bulkId, n);
-                store.writeSegment(bulkId, data, 0, len);
+                store.writeSegment(bulkId, data, 0, n);
 
                 for (int i = 0; i < n; i += BLOCK_SIZE) {
-                    blockIds.add(new RecordId(bulkId, data.length - len + i));
+                    blockIds.add(new RecordId(bulkId, data.length - n + i));
                 }
 
                 n = read(stream, data, 0, data.length);
@@ -986,12 +969,7 @@ public class SegmentWriter {
             try {
                 return writeNode(state, 0);
             } finally {
-                if (nodeWriteStats.isCompactOp) {
-                    nodeCompactTimeStats.addValue(nanoTime() - nodeWriteStats.startTime);
-                    LOG.info(nodeWriteStats.toString());
-                } else {
-                    nodeWriteTimeStats.addValue(nanoTime() - nodeWriteStats.startTime);
-                }
+                LOG.debug("{}", nodeWriteStats);
             }
         }
 
@@ -1003,7 +981,7 @@ public class SegmentWriter {
             checkState(nodeWriteStats != null);
             nodeWriteStats.nodeCount++;
 
-            RecordId compactedId = deduplicateNode(state);
+            RecordId compactedId = deduplicateNode(state, nodeWriteStats);
 
             if (compactedId != null) {
                 return compactedId;
@@ -1016,10 +994,16 @@ public class SegmentWriter {
                 // generation (e.g. due to compaction). Put it into the cache for
                 // deduplication of hard links to it (e.g. checkpoints).
                 SegmentNodeState sns = (SegmentNodeState) state;
-                nodeCache.put(sns.getStableId(), recordId, depth);
+                nodeCache.put(sns.getStableId(), recordId, cost(sns));
                 nodeWriteStats.isCompactOp = true;
+                compactionMonitor.compacted();
             }
             return recordId;
+        }
+
+        private byte cost(SegmentNodeState node) {
+            long childCount = node.getChildNodeCount(Long.MAX_VALUE);
+            return (byte) (Byte.MIN_VALUE + 64 - numberOfLeadingZeros(childCount));
         }
 
         private RecordId writeNodeUncached(@Nonnull NodeState state, int depth) throws IOException {
@@ -1032,7 +1016,9 @@ public class SegmentWriter {
             RecordId beforeId = null;
 
             if (after != null) {
-                beforeId = deduplicateNode(after.getBaseState());
+                // Pass null to indicate we don't want to update the node write statistics
+                // when deduplicating the base state
+                beforeId = deduplicateNode(after.getBaseState(), null);
             }
 
             SegmentNodeState before = null;
@@ -1138,11 +1124,12 @@ public class SegmentWriter {
          * and is still in the de-duplication cache for nodes.
          *
          * @param node The node states to de-duplicate.
+         * @param nodeWriteStats  write statistics to update if not {@code null}.
          * @return the id of the de-duplicated node or {@code null} if none.
          */
-        private RecordId deduplicateNode(NodeState node) {
-            checkState(nodeWriteStats != null);
-
+        private RecordId deduplicateNode(
+                @Nonnull NodeState node,
+                @CheckForNull NodeWriteStats nodeWriteStats) {
             if (!(node instanceof SegmentNodeState)) {
                 // De-duplication only for persisted node states
                 return null;
@@ -1158,7 +1145,9 @@ public class SegmentWriter {
             if (!isOldGeneration(sns.getRecordId())) {
                 // This segment node state is already in this store, no need to
                 // write it again
-                nodeWriteStats.deDupNodes++;
+                if (nodeWriteStats != null) {
+                    nodeWriteStats.deDupNodes++;
+                }
                 return sns.getRecordId();
             }
 
@@ -1167,12 +1156,14 @@ public class SegmentWriter {
             // cache
             RecordId compacted = nodeCache.get(sns.getStableId());
 
-            if (compacted == null) {
-                nodeWriteStats.cacheMiss++;
-                return null;
+            if (nodeWriteStats != null) {
+                if (compacted == null) {
+                    nodeWriteStats.cacheMiss++;
+                } else {
+                    nodeWriteStats.cacheHits++;
+                }
             }
 
-            nodeWriteStats.cacheHits++;
             return compacted;
         }
 
@@ -1196,7 +1187,7 @@ public class SegmentWriter {
 
         private boolean isOldGeneration(RecordId id) {
             try {
-                int thatGen = id.getSegment().getGcGeneration();
+                int thatGen = id.getSegmentId().getGcGeneration();
                 int thisGen = writer.getGeneration();
                 return thatGen < thisGen;
             } catch (SegmentNotFoundException snfe) {
@@ -1256,6 +1247,10 @@ public class SegmentWriter {
                 return true;
             }
         }
+    }
+
+    public void setCompactionMonitor(@Nonnull GCNodeWriteMonitor compactionMonitor) {
+        this.compactionMonitor = compactionMonitor;
     }
 
 }

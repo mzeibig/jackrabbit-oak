@@ -70,27 +70,29 @@ public class SizeDeltaGcEstimation implements GCEstimation {
         }
         if (delta == 0) {
             gcNeeded = true;
-            gcInfo = format(
-                    "Estimation skipped because the size delta value equals 0",
-                    delta);
+            gcInfo = "Estimation skipped because the size delta value equals 0";
         } else if (getPreviousCleanupSize() < 0) {
             gcNeeded = true;
-            gcInfo = format("Estimation skipped because of missing gc journal data");
+            gcInfo = "Estimation skipped because of missing gc journal data (expected on first run)";
         } else {
             long lastGc = getPreviousCleanupSize();
             long gain = totalSize - lastGc;
-            long gainP = 100 * (totalSize - lastGc) / totalSize;
+            long gainP = 100 * (totalSize - lastGc) / lastGc;
             gcNeeded = gain > delta;
+            gcInfo = format(
+                    "Segmentstore size has increased since the last garbage collection from %s (%s bytes) to %s (%s bytes), " +
+                    "an increase of %s (%s bytes) or %s%%. ",
+                    humanReadableByteCount(lastGc), lastGc,
+                    humanReadableByteCount(totalSize), totalSize,
+                    humanReadableByteCount(gain), gain, gainP);
             if (gcNeeded) {
-                gcInfo = format(
-                        "Size delta is %s%% or %s/%s (%s/%s bytes), so running compaction",
-                        gainP, humanReadableByteCount(lastGc),
-                        humanReadableByteCount(totalSize), lastGc, totalSize);
+                gcInfo = gcInfo + format(
+                        "This is greater than sizeDeltaEstimation=%s (%s bytes), so running garbage collection",
+                        humanReadableByteCount(delta), delta);
             } else {
-                gcInfo = format(
-                        "Size delta is %s%% or %s/%s (%s/%s bytes), so skipping compaction for now",
-                        gainP, humanReadableByteCount(lastGc),
-                        humanReadableByteCount(totalSize), lastGc, totalSize);
+                gcInfo = gcInfo + format(
+                        "This is less than sizeDeltaEstimation=%s (%s bytes), so skipping garbage collection",
+                        humanReadableByteCount(delta), delta);
             }
         }
         finished = true;

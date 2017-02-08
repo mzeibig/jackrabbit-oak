@@ -23,7 +23,7 @@
   <parent>
     <groupId>org.apache.jackrabbit</groupId>
     <artifactId>oak-parent</artifactId>
-    <version>1.6-SNAPSHOT</version>
+    <version>1.8-SNAPSHOT</version>
     <relativePath>../oak-parent/pom.xml</relativePath>
   </parent>
 
@@ -38,6 +38,10 @@
         <artifactId>maven-bundle-plugin</artifactId>
         <configuration>
           <instructions>
+            <Import-Package>
+              com.mongodb*;version="[2.14, 4)";resolution:=optional,
+              *
+            </Import-Package>
             <Export-Package>
               org.apache.jackrabbit.oak,
               org.apache.jackrabbit.oak.api,
@@ -53,6 +57,7 @@
               org.apache.jackrabbit.oak.plugins.blob,
               org.apache.jackrabbit.oak.plugins.blob.datastore,
               org.apache.jackrabbit.oak.plugins.commit,
+              org.apache.jackrabbit.oak.plugins.document.spi,
               org.apache.jackrabbit.oak.plugins.identifier,
               org.apache.jackrabbit.oak.plugins.index,
               org.apache.jackrabbit.oak.plugins.index.fulltext,
@@ -180,12 +185,6 @@
       <artifactId>oak-blob</artifactId>
       <version>${project.version}</version>
     </dependency>
-    <dependency>
-      <groupId>org.apache.jackrabbit</groupId>
-      <artifactId>oak-blob-cloud</artifactId>
-      <version>${project.version}</version>
-      <optional>true</optional>
-    </dependency>
     <!-- General utility libraries -->
     <dependency>
       <groupId>com.google.guava</groupId>
@@ -199,7 +198,6 @@
     <dependency>
       <groupId>commons-io</groupId>
       <artifactId>commons-io</artifactId>
-      <version>2.4</version>
     </dependency>
     <dependency>
       <groupId>io.dropwizard.metrics</groupId>
@@ -273,6 +271,12 @@
 
     <!-- Test Dependencies -->
     <dependency>
+      <groupId>org.hamcrest</groupId>
+      <artifactId>hamcrest-all</artifactId>
+      <version>1.3</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
       <groupId>junit</groupId>
       <artifactId>junit</artifactId>
       <scope>test</scope>
@@ -339,13 +343,18 @@
     <dependency>
       <groupId>org.apache.tomcat</groupId>
       <artifactId>tomcat-jdbc</artifactId>
-      <version>7.0.69</version>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>com.googlecode.json-simple</groupId>
       <artifactId>json-simple</artifactId>
       <version>1.1.1</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.github.fakemongo</groupId>
+      <artifactId>fongo</artifactId>
+      <version>2.0.6</version>
       <scope>test</scope>
     </dependency>
   </dependencies>

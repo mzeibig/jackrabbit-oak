@@ -21,6 +21,8 @@ package org.apache.jackrabbit.oak.segment.compaction;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
+import org.apache.jackrabbit.oak.segment.file.GCNodeWriteMonitor;
+
 /**
  * This class holds configuration options for segment store revision gc.
  */
@@ -32,14 +34,9 @@ public class SegmentGCOptions {
     public static final boolean PAUSE_DEFAULT = false;
 
     /**
-     * Default value for {@link #getMemoryThreshold()}
+     * Default value for {@link #isEstimationDisabled()}
      */
-    public static final byte MEMORY_THRESHOLD_DEFAULT = 5;
-
-    /**
-     * Default value for {@link #getGainThreshold()}
-     */
-    public static final byte GAIN_THRESHOLD_DEFAULT = 10;
+    public static final boolean DISABLE_ESTIMATION_DEFAULT = false;
 
     /**
      * Default value for {@link #getRetryCount()}
@@ -47,35 +44,46 @@ public class SegmentGCOptions {
     public static final int RETRY_COUNT_DEFAULT = 5;
 
     /**
-     * Default value for {@link #getForceAfterFail()}
+     * Default value for {@link #getForceTimeout()} in seconds.
      */
-    public static final boolean FORCE_AFTER_FAIL_DEFAULT = false;
-
-    /**
-     * Default value for {@link #getLockWaitTime()}
-     */
-    public static final int LOCK_WAIT_TIME_DEFAULT = 60000;
+    public static final int FORCE_TIMEOUT_DEFAULT = 60;
 
     /**
      * Default value for {@link #getRetainedGenerations()}
      */
     public static final int RETAINED_GENERATIONS_DEFAULT = 2;
 
+    /**
+     * Default value for {@link #getGcSizeDeltaEstimation()}.
+     */
+    public static final long SIZE_DELTA_ESTIMATION_DEFAULT = 1024L * 1024L * 1024L;
+
+    /**
+     * Default value for the gc progress log
+     */
+    public static final long GC_PROGRESS_LOG_DEFAULT = -1;
+
+    /**
+     * Default value for {@link #getMemoryThreshold()}
+     */
+    public static final int MEMORY_THRESHOLD_DEFAULT = 15;
+
     private boolean paused = PAUSE_DEFAULT;
 
-    private int memoryThreshold = MEMORY_THRESHOLD_DEFAULT;
-
-    private int gainThreshold = GAIN_THRESHOLD_DEFAULT;
+    /**
+     * Flag controlling whether the estimation phase will run before a GC cycle
+     */
+    private boolean estimationDisabled = DISABLE_ESTIMATION_DEFAULT;
 
     private int retryCount = RETRY_COUNT_DEFAULT;
 
-    private boolean forceAfterFail = FORCE_AFTER_FAIL_DEFAULT;
-
-    private int lockWaitTime = LOCK_WAIT_TIME_DEFAULT;
+    private int forceTimeout = FORCE_TIMEOUT_DEFAULT;
 
     private int retainedGenerations = RETAINED_GENERATIONS_DEFAULT;
 
     private boolean offline = false;
+
+    private int memoryThreshold = MEMORY_THRESHOLD_DEFAULT;
 
     private boolean ocBinDeduplication = Boolean
             .getBoolean("oak.segment.compaction.binaryDeduplication");
@@ -85,27 +93,28 @@ public class SegmentGCOptions {
             100 * 1024 * 1024);
 
     private long gcSizeDeltaEstimation = Long.getLong(
-            "oak.segment.compaction.gcSizeDeltaEstimation", -1);
+            "oak.segment.compaction.gcSizeDeltaEstimation",
+            SIZE_DELTA_ESTIMATION_DEFAULT);
 
-    public SegmentGCOptions(boolean paused, int memoryThreshold, int gainThreshold,
-                            int retryCount, boolean forceAfterFail, int lockWaitTime) {
+    /**
+     * Responsible for monitoring progress of the online compaction, and
+     * providing progress tracking.
+     */
+    private GCNodeWriteMonitor gcNodeWriteMonitor = GCNodeWriteMonitor.EMPTY;
+
+    public SegmentGCOptions(boolean paused, int retryCount, int forceTimeout) {
         this.paused = paused;
-        this.memoryThreshold = memoryThreshold;
-        this.gainThreshold = gainThreshold;
         this.retryCount = retryCount;
-        this.forceAfterFail = forceAfterFail;
-        this.lockWaitTime = lockWaitTime;
+        this.forceTimeout = forceTimeout;
     }
 
     public SegmentGCOptions() {
-        this(PAUSE_DEFAULT, MEMORY_THRESHOLD_DEFAULT, GAIN_THRESHOLD_DEFAULT,
-                RETRY_COUNT_DEFAULT, FORCE_AFTER_FAIL_DEFAULT, LOCK_WAIT_TIME_DEFAULT);
+        this(PAUSE_DEFAULT, RETRY_COUNT_DEFAULT, FORCE_TIMEOUT_DEFAULT);
     }
 
     /**
-     * Default options: {@link #PAUSE_DEFAULT}, {@link #MEMORY_THRESHOLD_DEFAULT},
-     * {@link #GAIN_THRESHOLD_DEFAULT}, {@link #RETRY_COUNT_DEFAULT},
-     * {@link #FORCE_AFTER_FAIL_DEFAULT}, {@link #LOCK_WAIT_TIME_DEFAULT}.
+     * Default options: {@link #PAUSE_DEFAULT}, {@link #RETRY_COUNT_DEFAULT},
+     * {@link #FORCE_TIMEOUT_DEFAULT}.
      */
     public static SegmentGCOptions defaultGCOptions() {
         return new SegmentGCOptions();
@@ -125,41 +134,6 @@ public class SegmentGCOptions {
      */
     public SegmentGCOptions setPaused(boolean paused) {
         this.paused = paused;
-        return this;
-    }
-
-    /**
-     * @return  the memory threshold below which revision gc will not run.
-     */
-    public int getMemoryThreshold() {
-        return memoryThreshold;
-    }
-
-    /**
-     * Set the memory threshold below which revision gc will not run.
-     * @param memoryThreshold
-     * @return this instance
-     */
-    public SegmentGCOptions setMemoryThreshold(int memoryThreshold) {
-        this.memoryThreshold = memoryThreshold;
-        return this;
-    }
-
-    /**
-     * Get the gain estimate threshold beyond which revision gc should run
-     * @return gainThreshold
-     */
-    public int getGainThreshold() {
-        return gainThreshold;
-    }
-
-    /**
-     * Set the revision gain estimate threshold beyond which revision gc should run
-     * @param gainThreshold
-     * @return this instance
-     */
-    public SegmentGCOptions setGainThreshold(int gainThreshold) {
-        this.gainThreshold = gainThreshold;
         return this;
     }
 
@@ -184,44 +158,26 @@ public class SegmentGCOptions {
     }
 
     /**
-     * Get whether or not to force compact concurrent commits on top of already
-     * compacted commits after the maximum number of retries has been reached.
-     * Force committing tries to exclusively write lock the node store.
-     * @return  {@code true} if force commit is on, {@code false} otherwise
+     * Get the number of seconds to attempt to force compact concurrent commits on top of
+     * already compacted commits after the maximum number of retries has been reached.
+     * Forced compaction acquires an exclusive write lock on the node store.
+     * @return  the number of seconds until forced compaction gives up and the exclusive
+     *          write lock on the node store is released.
      */
-    public boolean getForceAfterFail() {
-        return forceAfterFail;
+    public int getForceTimeout() {
+        return forceTimeout;
     }
 
     /**
-     * Set whether or not to force compact concurrent commits on top of already
-     * compacted commits after the maximum number of retries has been reached.
-     * Force committing tries to exclusively write lock the node store.
-     * @param forceAfterFail
+     * Set the number of seconds to attempt to force compact concurrent commits on top of
+     * already compacted commits after the maximum number of retries has been reached.
+     * Forced compaction acquires an exclusively write lock on the node store.
+     * @param timeout  the number of seconds until forced compaction gives up and the exclusive
+     *                 lock on the node store is released.
      * @return this instance
      */
-    public SegmentGCOptions setForceAfterFail(boolean forceAfterFail) {
-        this.forceAfterFail = forceAfterFail;
-        return this;
-    }
-
-    /**
-     * Get the time to wait for the lock when force compacting.
-     * See {@link #setForceAfterFail(boolean)}
-     * @return lock wait time in seconds.
-     */
-    public int getLockWaitTime() {
-        return lockWaitTime;
-    }
-
-    /**
-     * Set the time to wait for the lock when force compacting.
-     * @param lockWaitTime  lock wait time in seconds
-     * @return
-     * @return this instance
-     */
-    public SegmentGCOptions setLockWaitTime(int lockWaitTime) {
-        this.lockWaitTime = lockWaitTime;
+    public SegmentGCOptions setForceTimeout(int timeout) {
+        this.forceTimeout = timeout;
         return this;
     }
 
@@ -261,11 +217,10 @@ public class SegmentGCOptions {
         } else {
             return getClass().getSimpleName() + "{" +
                     "paused=" + paused +
-                    ", memoryThreshold=" + memoryThreshold +
-                    ", gainThreshold=" + gainThreshold +
+                    ", estimationDisabled=" + estimationDisabled +
+                    ", gcSizeDeltaEstimation=" + gcSizeDeltaEstimation +
                     ", retryCount=" + retryCount +
-                    ", forceAfterFail=" + forceAfterFail +
-                    ", lockWaitTime=" + lockWaitTime +
+                    ", forceTimeout=" + forceTimeout +
                     ", retainedGenerations=" + retainedGenerations +
                     ", gcSizeDeltaEstimation=" + gcSizeDeltaEstimation + "}";
         }
@@ -281,7 +236,7 @@ public class SegmentGCOptions {
      * @return {@code true} if the available disk space is considered enough for
      * normal repository operations.
      */
-    public boolean isDiskSpaceSufficient(long repositoryDiskSpace, long availableDiskSpace) {
+    public static boolean isDiskSpaceSufficient(long repositoryDiskSpace, long availableDiskSpace) {
         return availableDiskSpace > 0.25 * repositoryDiskSpace;
     }
 
@@ -331,10 +286,6 @@ public class SegmentGCOptions {
         return this.ocBinMaxSize;
     }
 
-    public boolean isGcSizeDeltaEstimation() {
-        return gcSizeDeltaEstimation >= 0;
-    }
-
     public long getGcSizeDeltaEstimation() {
         return gcSizeDeltaEstimation;
     }
@@ -342,5 +293,57 @@ public class SegmentGCOptions {
     public SegmentGCOptions setGcSizeDeltaEstimation(long gcSizeDeltaEstimation) {
         this.gcSizeDeltaEstimation = gcSizeDeltaEstimation;
         return this;
+    }
+
+    /**
+     * Get the available memory threshold beyond which revision gc will be
+     * canceled. Value represents a percentage so an value between {@code 0} and
+     * {@code 100} will be returned.
+     * @return memoryThreshold
+     */
+    public int getMemoryThreshold() {
+        return memoryThreshold;
+    }
+
+    /**
+     * Set the available memory threshold beyond which revision gc will be
+     * canceled. Value represents a percentage so an input between {@code 0} and
+     * {@code 100} is expected. Setting this to {@code 0} will disable the
+     * check.
+     * @param memoryThreshold
+     * @return this instance
+     */
+    public SegmentGCOptions setMemoryThreshold(int memoryThreshold) {
+        this.memoryThreshold = memoryThreshold;
+        return this;
+    }
+
+    public boolean isEstimationDisabled() {
+        return estimationDisabled;
+    }
+
+    /**
+     * Disables the estimation phase, thus allowing GC to run every time.
+     * @return this instance
+     */
+    public SegmentGCOptions setEstimationDisabled(boolean disabled) {
+        this.estimationDisabled = disabled;
+        return this;
+    }
+
+    /**
+     * Enables the GcWriteMonitor with the given params.
+     * @param gcProgressLog
+     *            Enables compaction progress logging at each set of compacted nodes, disabled if set to
+     *            {@code -1}
+     * @return this instance
+     */
+    public SegmentGCOptions withGCNodeWriteMonitor(long gcProgressLog) {
+        this.gcNodeWriteMonitor = new GCNodeWriteMonitor(gcProgressLog);
+        return this;
+    }
+
+    public GCNodeWriteMonitor getGCNodeWriteMonitor() {
+        return gcNodeWriteMonitor;
     }
 }

@@ -21,6 +21,8 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import javax.annotation.Nonnull;
+
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 
@@ -83,7 +85,7 @@ public class JournalTest extends AbstractJournalTest {
         }
         
         @Override
-        public void contentChanged(NodeState root, CommitInfo info) {
+        public void contentChanged(@Nonnull NodeState root,@Nonnull CommitInfo info) {
             synchronized(incomingRootStates1) {
                 incomingRootStates1.add((DocumentNodeState) root);
                 incomingRootStates1.notifyAll();
@@ -186,15 +188,15 @@ public class JournalTest extends AbstractJournalTest {
         JournalGarbageCollector gc = new JournalGarbageCollector(ns1);
         // first clean up
         Thread.sleep(100); // OAK-2979 : wait 100ms before doing the cleanup
-        gc.gc(1, 100, TimeUnit.MILLISECONDS);
+        gc.gc(1, TimeUnit.MILLISECONDS);
         Thread.sleep(100); // sleep just quickly
-        assertEquals(0, gc.gc(1, 100, TimeUnit.DAYS));
-        assertEquals(0, gc.gc(6, 100, TimeUnit.HOURS));
-        assertEquals(0, gc.gc(1, 100, TimeUnit.HOURS));
-        assertEquals(0, gc.gc(10, 100, TimeUnit.MINUTES));
-        assertEquals(0, gc.gc(1, 100, TimeUnit.MINUTES));
-        assertEquals(0, gc.gc(1, 100, TimeUnit.SECONDS));
-        assertEquals(0, gc.gc(1, 100, TimeUnit.MILLISECONDS));
+        assertEquals(0, gc.gc(1, TimeUnit.DAYS));
+        assertEquals(0, gc.gc(6, TimeUnit.HOURS));
+        assertEquals(0, gc.gc(1, TimeUnit.HOURS));
+        assertEquals(0, gc.gc(10, TimeUnit.MINUTES));
+        assertEquals(0, gc.gc(1, TimeUnit.MINUTES));
+        assertEquals(0, gc.gc(1, TimeUnit.SECONDS));
+        assertEquals(0, gc.gc(1, TimeUnit.MILLISECONDS));
         
         // create some entries that can be deleted thereupon
         mk1.commit("/", "+\"regular1\": {}", null, null);
@@ -202,16 +204,16 @@ public class JournalTest extends AbstractJournalTest {
         mk1.commit("/", "+\"regular3\": {}", null, null);
         mk1.commit("/regular2", "+\"regular4\": {}", null, null);
         Thread.sleep(100); // sleep 100millis
-        assertEquals(0, gc.gc(5, 100, TimeUnit.SECONDS));
-        assertEquals(0, gc.gc(1, 100, TimeUnit.MILLISECONDS));
+        assertEquals(0, gc.gc(5, TimeUnit.SECONDS));
+        assertEquals(0, gc.gc(1, TimeUnit.MILLISECONDS));
         ns1.runBackgroundOperations();
         mk1.commit("/", "+\"regular5\": {}", null, null);
         ns1.runBackgroundOperations();
         mk1.commit("/", "+\"regular6\": {}", null, null);
         ns1.runBackgroundOperations();
         Thread.sleep(100); // sleep 100millis
-        assertEquals(0, gc.gc(5, 100, TimeUnit.SECONDS));
-        assertEquals(3, gc.gc(1, 100, TimeUnit.MILLISECONDS));
+        assertEquals(0, gc.gc(5, TimeUnit.SECONDS));
+        assertEquals(3, gc.gc(1, TimeUnit.MILLISECONDS));
     }
     
     @Test
@@ -335,11 +337,9 @@ public class JournalTest extends AbstractJournalTest {
         DocumentNodeStore ds2 = mk2.getNodeStore();
         final int c2Id = ds2.getClusterId();
         
-        // should have 1 each with just the root changed
-        assertJournalEntries(ds1, "{}");
-        assertJournalEntries(ds2, "{}");
-        assertEquals(1, countJournalEntries(ds1, 10)); 
-        assertEquals(1, countJournalEntries(ds2, 10));
+        // should have none yet
+        assertEquals(0, countJournalEntries(ds1, 10));
+        assertEquals(0, countJournalEntries(ds2, 10));
         
         //1. Create base structure /x/y
         NodeBuilder b1 = ds1.getRoot().builder();
@@ -379,11 +379,11 @@ public class JournalTest extends AbstractJournalTest {
 
         final LastRevRecoveryAgent recovery = new LastRevRecoveryAgent(ds1);
 
-        // besides the former root change, now 1 also has 
+        // now 1 also has
         final String change1 = "{\"x\":{\"y\":{}}}";
-        assertJournalEntries(ds1, "{}", change1);
+        assertJournalEntries(ds1, change1);
         final String change2 = "{\"x\":{}}";
-        assertJournalEntries(ds2, "{}", change2);
+        assertJournalEntries(ds2, change2);
 
 
         String change2b = "{\"x\":{\"y\":{\"z\":{}}}}";
@@ -398,14 +398,14 @@ public class JournalTest extends AbstractJournalTest {
             assertEquals(head2, getDocument(ds1, "/").getLastRev().get(c2Id));
     
             // now 1 is unchanged, but 2 was recovered now, so has one more:
-            assertJournalEntries(ds1, "{}", change1); // unchanged
-            assertJournalEntries(ds2, "{}", change2, change2b);
+            assertJournalEntries(ds1, change1); // unchanged
+            assertJournalEntries(ds2, change2, change2b);
             
             // just some no-ops:
             recovery.recover(c2Id);
             recovery.recover(Iterators.<NodeDocument>emptyIterator(), c2Id);
-            assertJournalEntries(ds1, "{}", change1); // unchanged
-            assertJournalEntries(ds2, "{}", change2, change2b);
+            assertJournalEntries(ds1, change1); // unchanged
+            assertJournalEntries(ds2, change2, change2b);
 
         } else {
         
@@ -437,8 +437,8 @@ public class JournalTest extends AbstractJournalTest {
             ready.await(5, TimeUnit.SECONDS);
             start.countDown();
             assertTrue(end.await(20, TimeUnit.SECONDS));
-            assertJournalEntries(ds1, "{}", change1); // unchanged
-            assertJournalEntries(ds2, "{}", change2, change2b);
+            assertJournalEntries(ds1, change1); // unchanged
+            assertJournalEntries(ds2, change2, change2b);
             for (Exception ex : exceptions) {
                 throw ex;
             }

@@ -22,30 +22,39 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkPositionIndexes;
 import static com.google.common.base.Preconditions.checkState;
-import static com.google.common.collect.Lists.newArrayListWithCapacity;
+import static java.util.Arrays.fill;
 import static org.apache.jackrabbit.oak.commons.IOUtils.closeQuietly;
+import static org.apache.jackrabbit.oak.segment.CacheWeights.OBJECT_HEADER_SIZE;
+import static org.apache.jackrabbit.oak.segment.RecordNumbers.EMPTY_RECORD_NUMBERS;
 import static org.apache.jackrabbit.oak.segment.SegmentId.isDataSegmentId;
 import static org.apache.jackrabbit.oak.segment.SegmentVersion.LATEST_VERSION;
 import static org.apache.jackrabbit.oak.segment.SegmentVersion.isValid;
 import static org.apache.jackrabbit.oak.segment.SegmentWriter.BLOCK_SIZE;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
+import java.nio.channels.WritableByteChannel;
 import java.util.Arrays;
-import java.util.List;
+import java.util.Iterator;
 import java.util.UUID;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
-import com.google.common.base.Charsets;
 import org.apache.commons.io.HexDump;
 import org.apache.commons.io.output.ByteArrayOutputStream;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
+import org.apache.jackrabbit.oak.commons.StringUtils;
 import org.apache.jackrabbit.oak.plugins.memory.PropertyStates;
+import org.apache.jackrabbit.oak.segment.RecordNumbers.Entry;
+
+import com.google.common.base.Charsets;
+import com.google.common.collect.AbstractIterator;
 
 /**
  * A list of records.
@@ -57,12 +66,25 @@ import org.apache.jackrabbit.oak.plugins.memory.PropertyStates;
  */
 public class Segment {
 
+    static final int HEADER_SIZE = 32;
+
     /**
-     * Number of bytes used for storing a record identifier. One byte
-     * is used for identifying the segment and two for the record offset
+     * Size of a line in the table of references to external segments.
+     */
+    static final int SEGMENT_REFERENCE_SIZE = 16;
+
+    /**
+     * Size of a line in the table mapping record numbers to their type and
+     * offset.
+     */
+    static final int RECORD_SIZE = 9;
+
+    /**
+     * Number of bytes used for storing a record identifier. Two bytes
+     * are used for identifying the segment and four for the record offset
      * within that segment.
      */
-    static final int RECORD_ID_BYTES = 1 + 2;
+    static final int RECORD_ID_BYTES = 2 + 4;
 
     /**
      * The limit on segment references within one segment. Since record
@@ -111,11 +133,11 @@ public class Segment {
      */
     public static final int BLOB_ID_SMALL_LIMIT = 1 << 12;
 
-    public static final int REF_COUNT_OFFSET = 5;
-
-    static final int ROOT_COUNT_OFFSET = 6;
-
     public static final int GC_GENERATION_OFFSET = 10;
+
+    public static final int REFERENCED_SEGMENT_ID_COUNT_OFFSET = 14;
+
+    public static final int RECORD_NUMBER_COUNT_OFFSET = 18;
 
     @Nonnull
     private final SegmentStore store;
@@ -136,29 +158,14 @@ public class Segment {
     private final SegmentVersion version;
 
     /**
-     * Referenced segment identifiers. Entries are initialized lazily in
-     * {@link #getRefId(int)}. Set to {@code null} for bulk segments.
+     * The table translating record numbers to offsets.
      */
-    @CheckForNull
-    private final SegmentId[] refids;
+    private final RecordNumbers recordNumbers;
 
     /**
-     * Unpacks a 4 byte aligned segment offset.
-     * @param offset  4 byte aligned segment offset
-     * @return unpacked segment offset
+     * The table translating references to segment IDs.
      */
-    public static int unpack(short offset) {
-        return (offset & 0xffff) << RECORD_ALIGN_BITS;
-    }
-
-    /**
-     * Packs a segment offset into a 4 byte aligned address packed into a {@code short}.
-     * @param offset  segment offset
-     * @return  encoded segment offset packed into a {@code short}
-     */
-    public static short pack(int offset) {
-        return (short) (offset >> RECORD_ALIGN_BITS);
-    }
+    private final SegmentReferences segmentReferences;
 
     /**
      * Align an {@code address} on the given {@code boundary}
@@ -193,12 +200,13 @@ public class Segment {
                             + toHex(data.array());
                     }
             });
-            this.refids = new SegmentId[getRefCount()];
-            this.refids[0] = id;
             this.version = SegmentVersion.fromByte(segmentVersion);
+            this.recordNumbers = readRecordNumberOffsets();
+            this.segmentReferences = readReferencedSegments();
         } else {
-            this.refids = null;
             this.version = LATEST_VERSION;
+            this.recordNumbers = new IdentityRecordNumbers();
+            this.segmentReferences = new IllegalSegmentReferences();
         }
     }
 
@@ -214,18 +222,96 @@ public class Segment {
         }
     }
 
+    /**
+     * Read the serialized table mapping record numbers to offsets.
+     *
+     * @return An instance of {@link RecordNumbers}, never {@code null}.
+     */
+    private RecordNumbers readRecordNumberOffsets() {
+        int recordNumberCount = getRecordNumberCount();
+        if (recordNumberCount == 0) {
+            return EMPTY_RECORD_NUMBERS;
+        }
+
+        int position = HEADER_SIZE + data.position()
+                + getReferencedSegmentIdCount() * SEGMENT_REFERENCE_SIZE;
+        int maxIndex = data.getInt(position + (recordNumberCount - 1) * 9);
+
+        byte[] types = new byte[maxIndex + 1];
+        int[] offsets = new int[maxIndex + 1];
+        fill(offsets, -1);
+
+        for (int i = 0; i < recordNumberCount; i++) {
+            int recordNumber = data.getInt(position);
+            position += 4;
+            types[recordNumber] = data.get(position);
+            position += 1;
+            offsets[recordNumber] = data.getInt(position);
+            position += 4;
+        }
+
+        return new ImmutableRecordNumbers(offsets, types);
+    }
+
+    private SegmentReferences readReferencedSegments() {
+        checkState(getReferencedSegmentIdCount() + 1 < 0xffff,
+                "Segment cannot have more than 0xffff references");
+
+        final int referencedSegmentIdCount = getReferencedSegmentIdCount();
+        final int refOffset = data.position() + HEADER_SIZE;
+        final SegmentId[] refIds = new SegmentId[referencedSegmentIdCount];
+        return new SegmentReferences() {
+            @Override
+            public SegmentId getSegmentId(int reference) {
+                checkArgument(reference <= referencedSegmentIdCount);
+                SegmentId id = refIds[reference - 1];
+                if (id == null) {
+                    synchronized(refIds) {
+                        id = refIds[reference - 1];
+                        if (id == null) {
+                            int position = refOffset + (reference - 1) * SEGMENT_REFERENCE_SIZE;
+                            long msb = data.getLong(position);
+                            long lsb = data.getLong(position + 8);
+                            id = store.newSegmentId(msb, lsb);
+                            refIds[reference - 1] = id;
+                        }
+                    }
+                }
+                return id;
+            }
+
+            @Override
+            public Iterator<SegmentId> iterator() {
+                return new AbstractIterator<SegmentId>() {
+                    private int reference = 1;
+                    @Override
+                    protected SegmentId computeNext() {
+                        if (reference <= referencedSegmentIdCount) {
+                            return getSegmentId(reference++);
+                        } else {
+                            return endOfData();
+                        }
+                    }
+                };
+            }
+        };
+    }
+
     Segment(@Nonnull SegmentStore store,
             @Nonnull SegmentReader reader,
             @Nonnull byte[] buffer,
-            @Nonnull String info) {
+            @Nonnull RecordNumbers recordNumbers,
+            @Nonnull SegmentReferences segmentReferences,
+            @Nonnull String info
+    ) {
         this.store = checkNotNull(store);
         this.reader = checkNotNull(reader);
         this.id = store.newDataSegmentId();
         this.info = checkNotNull(info);
         this.data = ByteBuffer.wrap(checkNotNull(buffer));
-        this.refids = new SegmentId[SEGMENT_REFERENCE_LIMIT + 1];
-        this.refids[0] = id;
         this.version = SegmentVersion.fromByte(buffer[3]);
+        this.recordNumbers = recordNumbers;
+        this.segmentReferences = segmentReferences;
         id.loaded(this);
     }
 
@@ -233,18 +319,36 @@ public class Segment {
         return version;
     }
 
+    private int pos(int recordNumber, int length) {
+        return pos(recordNumber, 0, 0, length);
+    }
+
+    private int pos(int recordNumber, int rawOffset, int length) {
+        return pos(recordNumber, rawOffset, 0, length);
+    }
+
     /**
-     * Maps the given record offset to the respective position within the
+     * Maps the given record number to the respective position within the
      * internal {@link #data} array. The validity of a record with the given
-     * length at the given offset is also verified.
+     * length at the given record number is also verified.
      *
-     * @param offset record offset
-     * @param length record length
+     * @param recordNumber   record number
+     * @param rawOffset      offset to add to the base position of the record
+     * @param recordIdOffset offset to add to to the base position of the
+     *                       record, multiplied by the length of a record ID
+     * @param length         record length
      * @return position within the data array
      */
-    private int pos(int offset, int length) {
-        checkPositionIndexes(offset, offset + length, MAX_SEGMENT_SIZE);
-        int pos = data.limit() - MAX_SEGMENT_SIZE + offset;
+    private int pos(int recordNumber, int rawOffset, int recordIdOffset, int length) {
+        int offset = recordNumbers.getOffset(recordNumber);
+
+        if (offset == -1) {
+            throw new IllegalStateException("invalid record number");
+        }
+
+        int base = offset + rawOffset + recordIdOffset * RECORD_ID_BYTES;
+        checkPositionIndexes(base, base + length, MAX_SEGMENT_SIZE);
+        int pos = data.limit() - MAX_SEGMENT_SIZE + base;
         checkState(pos >= data.position());
         return pos;
     }
@@ -253,12 +357,16 @@ public class Segment {
         return id;
     }
 
-    int getRefCount() {
-        return (data.get(REF_COUNT_OFFSET) & 0xff) + 1;
+    public int getReferencedSegmentIdCount() {
+        return data.getInt(REFERENCED_SEGMENT_ID_COUNT_OFFSET);
     }
 
-    public int getRootCount() {
-        return data.getShort(ROOT_COUNT_OFFSET) & 0xffff;
+    public int getRecordNumberCount() {
+        return data.getInt(RECORD_NUMBER_COUNT_OFFSET);
+    }
+
+    public UUID getReferencedSegmentId(int index) {
+        return segmentReferences.getSegmentId(index + 1).asUUID();
     }
 
     /**
@@ -284,19 +392,6 @@ public class Segment {
         return getGcGeneration(data, id.asUUID());
     }
 
-    public RecordType getRootType(int index) {
-        int refCount = getRefCount();
-        checkArgument(index < getRootCount());
-        return RecordType.values()[data.get(data.position() + refCount * 16 + index * 3) & 0xff];
-    }
-
-    public int getRootOffset(int index) {
-        int refCount = getRefCount();
-        checkArgument(index < getRootCount());
-        return (data.getShort(data.position() + refCount * 16 + index * 3 + 1) & 0xffff)
-                << RECORD_ALIGN_BITS;
-    }
-
     private volatile String info;
 
     /**
@@ -316,94 +411,94 @@ public class Segment {
      */
     @CheckForNull
     public String getSegmentInfo() {
-        if (info == null && getRefCount() != 0) {
-            info = readString(getRootOffset(0));
+        if (info == null && id.isDataSegmentId()) {
+            info = readString(recordNumbers.iterator().next().getRecordNumber());
         }
         return info;
-    }
-
-    SegmentId getRefId(int index) {
-        if (refids == null || index >= refids.length) {
-            String type = "data";
-            if (!id.isDataSegmentId()) {
-                type = "bulk";
-            }
-            long delta = System.currentTimeMillis() - id.getCreationTime();
-            throw new IllegalStateException("RefId '" + index
-                    + "' doesn't exist in " + type + " segment " + id
-                    + ". Creation date delta is " + delta + " ms.");
-        }
-        SegmentId refid = refids[index];
-        if (refid == null) {
-            synchronized (this) {
-                refid = refids[index];
-                if (refid == null) {
-                    int refpos = data.position() + index * 16;
-                    long msb = data.getLong(refpos);
-                    long lsb = data.getLong(refpos + 8);
-                    refid = store.newSegmentId(msb, lsb);
-                    refids[index] = refid;
-                }
-            }
-        }
-        return refid;
-    }
-
-    public List<SegmentId> getReferencedIds() {
-        int refcount = getRefCount();
-        List<SegmentId> ids = newArrayListWithCapacity(refcount);
-        for (int refid = 0; refid < refcount; refid++) {
-            ids.add(getRefId(refid));
-        }
-        return ids;
     }
 
     public int size() {
         return data.remaining();
     }
 
-    byte readByte(int offset) {
-        return data.get(pos(offset, 1));
+    byte readByte(int recordNumber) {
+        return readByte(recordNumber, 0);
     }
 
-    short readShort(int offset) {
-        return data.getShort(pos(offset, 2));
+    byte readByte(int recordNumber, int offset) {
+        return data.get(pos(recordNumber, offset, 1));
     }
 
-    int readInt(int offset) {
-        return data.getInt(pos(offset, 4));
+    short readShort(int recordNumber) {
+        return data.getShort(pos(recordNumber, 2));
     }
 
-    long readLong(int offset) {
-        return data.getLong(pos(offset, 8));
+    int readInt(int recordNumber) {
+        return data.getInt(pos(recordNumber, 4));
+    }
+
+    int readInt(int recordNumber, int offset) {
+        return data.getInt(pos(recordNumber, offset, 4));
+    }
+
+    long readLong(int recordNumber) {
+        return data.getLong(pos(recordNumber, 8));
     }
 
     /**
      * Reads the given number of bytes starting from the given position
      * in this segment.
      *
-     * @param position position within segment
+     * @param recordNumber position within segment
      * @param buffer target buffer
      * @param offset offset within target buffer
      * @param length number of bytes to read
      */
-    void readBytes(int position, byte[] buffer, int offset, int length) {
+    void readBytes(int recordNumber, byte[] buffer, int offset, int length) {
+        readBytes(recordNumber, 0, buffer, offset, length);
+    }
+
+    void readBytes(int recordNumber, int position, byte[] buffer, int offset, int length) {
         checkNotNull(buffer);
         checkPositionIndexes(offset, offset + length, buffer.length);
         ByteBuffer d = data.duplicate();
-        d.position(pos(position, length));
+        d.position(pos(recordNumber, position, length));
         d.get(buffer, offset, length);
     }
 
-    RecordId readRecordId(int offset) {
-        int pos = pos(offset, RECORD_ID_BYTES);
-        return internalReadRecordId(pos);
+    RecordId readRecordId(int recordNumber, int rawOffset, int recordIdOffset) {
+        return internalReadRecordId(pos(recordNumber, rawOffset, recordIdOffset, RECORD_ID_BYTES));
+    }
+
+    RecordId readRecordId(int recordNumber, int rawOffset) {
+        return readRecordId(recordNumber, rawOffset, 0);
+    }
+
+    RecordId readRecordId(int recordNumber) {
+        return readRecordId(recordNumber, 0, 0);
     }
 
     private RecordId internalReadRecordId(int pos) {
-        SegmentId refid = getRefId(data.get(pos) & 0xff);
-        int offset = ((data.get(pos + 1) & 0xff) << 8) | (data.get(pos + 2) & 0xff);
-        return new RecordId(refid, offset << RECORD_ALIGN_BITS);
+        SegmentId segmentId = dereferenceSegmentId(asUnsigned(data.getShort(pos)));
+        return new RecordId(segmentId, data.getInt(pos + 2));
+    }
+
+    private static int asUnsigned(short value) {
+        return value & 0xffff;
+    }
+
+    private SegmentId dereferenceSegmentId(int reference) {
+        if (reference == 0) {
+            return id;
+        }
+
+        SegmentId id = segmentReferences.getSegmentId(reference);
+
+        if (id == null) {
+            throw new IllegalStateException("Referenced segment not found");
+        }
+
+        return id;
     }
 
     @Nonnull
@@ -434,19 +529,20 @@ public class Segment {
     }
 
     @Nonnull
-    Template readTemplate(int offset) {
-        int head = readInt(offset);
+    Template readTemplate(int recordNumber) {
+        int head = readInt(recordNumber);
         boolean hasPrimaryType = (head & (1 << 31)) != 0;
         boolean hasMixinTypes = (head & (1 << 30)) != 0;
         boolean zeroChildNodes = (head & (1 << 29)) != 0;
         boolean manyChildNodes = (head & (1 << 28)) != 0;
         int mixinCount = (head >> 18) & ((1 << 10) - 1);
         int propertyCount = head & ((1 << 18) - 1);
-        offset += 4;
+
+        int offset = 4;
 
         PropertyState primaryType = null;
         if (hasPrimaryType) {
-            RecordId primaryId = readRecordId(offset);
+            RecordId primaryId = readRecordId(recordNumber, offset);
             primaryType = PropertyStates.createProperty(
                     "jcr:primaryType", reader.readString(primaryId), Type.NAME);
             offset += RECORD_ID_BYTES;
@@ -456,7 +552,7 @@ public class Segment {
         if (hasMixinTypes) {
             String[] mixins = new String[mixinCount];
             for (int i = 0; i < mixins.length; i++) {
-                RecordId mixinId = readRecordId(offset);
+                RecordId mixinId = readRecordId(recordNumber, offset);
                 mixins[i] =  reader.readString(mixinId);
                 offset += RECORD_ID_BYTES;
             }
@@ -468,24 +564,24 @@ public class Segment {
         if (manyChildNodes) {
             childName = Template.MANY_CHILD_NODES;
         } else if (!zeroChildNodes) {
-            RecordId childNameId = readRecordId(offset);
+            RecordId childNameId = readRecordId(recordNumber, offset);
             childName = reader.readString(childNameId);
             offset += RECORD_ID_BYTES;
         }
 
         PropertyTemplate[] properties;
-        properties = readProps(propertyCount, offset);
+        properties = readProps(propertyCount, recordNumber, offset);
         return new Template(reader, primaryType, mixinTypes, properties, childName);
     }
 
-    private PropertyTemplate[] readProps(int propertyCount, int offset) {
+    private PropertyTemplate[] readProps(int propertyCount, int recordNumber, int offset) {
         PropertyTemplate[] properties = new PropertyTemplate[propertyCount];
         if (propertyCount > 0) {
-            RecordId id = readRecordId(offset);
+            RecordId id = readRecordId(recordNumber, offset);
             ListRecord propertyNames = new ListRecord(id, properties.length);
             offset += RECORD_ID_BYTES;
             for (int i = 0; i < propertyCount; i++) {
-                byte type = readByte(offset++);
+                byte type = readByte(recordNumber, offset++);
                 properties[i] = new PropertyTemplate(i,
                         reader.readString(propertyNames.getEntry(i)), Type.fromTag(
                                 Math.abs(type), type < 0));
@@ -494,12 +590,12 @@ public class Segment {
         return properties;
     }
 
-    long readLength(RecordId id) {
-        return id.getSegment().readLength(id.getOffset());
+    static long readLength(RecordId id) {
+        return id.getSegment().readLength(id.getRecordNumber());
     }
 
-    long readLength(int offset) {
-        return internalReadLength(pos(offset, 1));
+    long readLength(int recordNumber) {
+        return internalReadLength(pos(recordNumber, 1));
     }
 
     private long internalReadLength(int pos) {
@@ -538,17 +634,16 @@ public class Segment {
             }
             if (id.isDataSegmentId()) {
                 writer.println("--------------------------------------------------------------------------");
-                int refcount = getRefCount();
-                for (int refid = 0; refid < refcount; refid++) {
-                    writer.format("reference %02x: %s%n", refid, getRefId(refid));
+
+                int i = 1;
+
+                for (SegmentId segmentId : segmentReferences) {
+                    writer.format("reference %02x: %s%n", i++, segmentId);
                 }
-                int rootcount = data.getShort(ROOT_COUNT_OFFSET) & 0xffff;
-                int pos = data.position() + refcount * 16;
-                for (int rootid = 0; rootid < rootcount; rootid++) {
-                    writer.format(
-                            "root %d: %s at %04x%n", rootid,
-                            RecordType.values()[data.get(pos + rootid * 3) & 0xff],
-                            data.getShort(pos + rootid * 3 + 1) & 0xffff);
+
+                for (Entry entry : recordNumbers) {
+                    writer.format("%10s record %08x: %08x%n",
+                            entry.getType(), entry.getRecordNumber(), entry.getOffset());
                 }
             }
             writer.println("--------------------------------------------------------------------------");
@@ -587,4 +682,63 @@ public class Segment {
         }
     }
 
+    public void writeTo(OutputStream stream) throws IOException {
+        ByteBuffer buffer = data.duplicate();
+        WritableByteChannel channel = Channels.newChannel(stream);
+        while (buffer.hasRemaining()) {
+            channel.write(buffer);
+        }
+    }
+
+    /**
+     * A consumer of record data.
+     */
+    public interface RecordConsumer {
+
+        /**
+         * Consume data about a record.
+         *
+         * @param number the record number.
+         * @param type   the record type.
+         * @param offset the offset where the record is stored.
+         */
+        void consume(int number, RecordType type, int offset);
+
+    }
+
+    /**
+     * Iterate over the records contained in this segment.
+     *
+     * @param consumer an instance of {@link RecordConsumer}.
+     */
+    public void forEachRecord(RecordConsumer consumer) {
+        for (Entry entry : recordNumbers) {
+            consumer.consume(entry.getRecordNumber(), entry.getType(), entry.getOffset());
+        }
+    }
+
+    /**
+     * Estimate of how much memory this instance would occupy in the segment
+     * cache.
+     */
+    public int estimateMemoryUsage() {
+        int size = OBJECT_HEADER_SIZE + 76;
+        size += 56; // 7 refs x 8 bytes
+
+        if (id.isDataSegmentId()) {
+            int recordNumberCount = getRecordNumberCount();
+            size += 5 * recordNumberCount;
+
+            int referencedSegmentIdCount = getReferencedSegmentIdCount();
+            size += 8 * referencedSegmentIdCount;
+
+            size += StringUtils.estimateMemoryUsage(info);
+        }
+        if (!data.isDirect()) {
+            // seems to over report by 100+ bytes
+            size += size();
+        }
+        size += id.estimateMemoryUsage();
+        return size;
+    }
 }

@@ -46,6 +46,7 @@ import com.google.common.base.Predicate;
 import com.google.common.cache.LoadingCache;
 import com.google.common.cache.Weigher;
 import com.google.common.collect.Iterators;
+import com.google.common.collect.Lists;
 import com.google.common.io.ByteStreams;
 import com.google.common.io.Closeables;
 import org.apache.commons.io.FileUtils;
@@ -60,6 +61,7 @@ import org.apache.jackrabbit.oak.cache.CacheStats;
 import org.apache.jackrabbit.oak.commons.StringUtils;
 import org.apache.jackrabbit.oak.plugins.blob.BlobTrackingStore;
 import org.apache.jackrabbit.oak.plugins.blob.SharedDataStore;
+import org.apache.jackrabbit.oak.spi.blob.BlobOptions;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.blob.stats.StatsCollectingStreams;
 import org.apache.jackrabbit.oak.spi.blob.stats.BlobStatsCollector;
@@ -72,8 +74,8 @@ import org.slf4j.LoggerFactory;
  * It also handles inlining binaries if there size is smaller than
  * {@link org.apache.jackrabbit.core.data.DataStore#getMinRecordLength()}
  */
-public class DataStoreBlobStore implements DataStore, BlobStore,
-        GarbageCollectableBlobStore, BlobTrackingStore {
+public class DataStoreBlobStore
+    implements DataStore, BlobStore, GarbageCollectableBlobStore, BlobTrackingStore, TypedDataStore {
     private final Logger log = LoggerFactory.getLogger(getClass());
 
     protected final DataStore delegate;
@@ -107,7 +109,12 @@ public class DataStoreBlobStore implements DataStore, BlobStore,
     private final Weigher<String, byte[]> weigher = new Weigher<String, byte[]>() {
         @Override
         public int weigh(@Nonnull String key, @Nonnull byte[] value) {
-            return StringUtils.estimateMemoryUsage(key) + value.length;
+            long weight = (long)StringUtils.estimateMemoryUsage(key) + value.length;
+            if (weight > Integer.MAX_VALUE) {
+                log.debug("Calculated weight larger than Integer.MAX_VALUE: {}.", weight);
+                weight = Integer.MAX_VALUE;
+            }
+            return (int) weight;
         }
     };
 
@@ -163,7 +170,7 @@ public class DataStoreBlobStore implements DataStore, BlobStore,
     @Override
     public DataRecord addRecord(InputStream stream) throws DataStoreException {
         try {
-            return writeStream(stream);
+            return writeStream(stream, new BlobOptions());
         } catch (IOException e) {
             throw new DataStoreException(e);
         }
@@ -205,11 +212,16 @@ public class DataStoreBlobStore implements DataStore, BlobStore,
 
     @Override
     public String writeBlob(InputStream stream) throws IOException {
+        return writeBlob(stream, new BlobOptions());
+    }
+
+    @Override
+    public String writeBlob(InputStream stream, BlobOptions options) throws IOException {
         boolean threw = true;
         try {
             long start = System.nanoTime();
             checkNotNull(stream);
-            DataRecord dr = writeStream(stream);
+            DataRecord dr = writeStream(stream, options);
             String id = getBlobId(dr);
             if (tracker != null && !InMemoryDataRecord.isInstance(id)) {
                 try {
@@ -289,7 +301,7 @@ public class DataStoreBlobStore implements DataStore, BlobStore,
 
         DataRecord record;
         try {
-            record = delegate.getRecord(new DataIdentifier(blobId));
+            record = delegate.getRecordIfStored(new DataIdentifier(blobId));
             if (record != null) {
                 return record.getReference();
             } else {
@@ -406,6 +418,7 @@ public class DataStoreBlobStore implements DataStore, BlobStore,
     public long countDeleteChunks(List<String> chunkIds, long maxLastModifiedTime) throws Exception {
         int count = 0;
         if (delegate instanceof MultiDataStoreAware) {
+            List<String> deleted = Lists.newArrayListWithExpectedSize(512);
             for (String chunkId : chunkIds) {
                 String blobId = extractBlobId(chunkId);
                 DataIdentifier identifier = new DataIdentifier(blobId);
@@ -416,9 +429,16 @@ public class DataStoreBlobStore implements DataStore, BlobStore,
                     dataRecord.getLastModified(), success);
                 if (success) {
                     ((MultiDataStoreAware) delegate).deleteRecord(identifier);
-                    log.info("Deleted blob [{}]", blobId);
+                    deleted.add(blobId);
                     count++;
+                    if (count % 512 == 0) {
+                        log.info("Deleted blobs {}", deleted);
+                        deleted.clear();
+                    }
                 }
+            }
+            if (!deleted.isEmpty()) {
+                log.info("Deleted blobs {}", deleted);
             }
         }
         return count;
@@ -509,6 +529,15 @@ public class DataStoreBlobStore implements DataStore, BlobStore,
         return Type.DEFAULT;
     }
 
+
+    @Override
+    public DataRecord addRecord(InputStream input, BlobOptions options) throws DataStoreException {
+        if (delegate instanceof TypedDataStore) {
+            return ((TypedDataStore) delegate).addRecord(input, options);
+        }
+        return delegate.addRecord(input);
+    }
+
     //~---------------------------------------------< Object >
 
     @Override
@@ -581,9 +610,10 @@ public class DataStoreBlobStore implements DataStore, BlobStore,
      * while large objects are stored in the data store
      *
      * @param in the input stream
+     * @param options
      * @return the value
      */
-    private DataRecord writeStream(InputStream in) throws IOException, DataStoreException {
+    private DataRecord writeStream(InputStream in, BlobOptions options) throws IOException, DataStoreException {
         int maxMemorySize = Math.max(0, delegate.getMinRecordLength() + 1);
         byte[] buffer = new byte[maxMemorySize];
         int pos = 0, len = maxMemorySize;
@@ -604,7 +634,7 @@ public class DataStoreBlobStore implements DataStore, BlobStore,
         } else {
             // a few bytes are already read, need to re-build the input stream
             in = new SequenceInputStream(new ByteArrayInputStream(buffer, 0, pos), in);
-            record = delegate.addRecord(in);
+            record = addRecord(in, options);
         }
         return record;
     }
@@ -623,8 +653,13 @@ public class DataStoreBlobStore implements DataStore, BlobStore,
         return encodedBlobId;
     }
 
-    static class BlobId {
+    public static class BlobId {
         static final String SEP = "#";
+
+        public String getBlobId() {
+            return blobId;
+        }
+
         final String blobId;
         final long length;
 
@@ -672,7 +707,7 @@ public class DataStoreBlobStore implements DataStore, BlobStore,
             return encodedBlobId.contains(SEP);
         }
 
-        static BlobId of(String encodedValue) {
+        public static BlobId of(String encodedValue) {
             return new BlobId(encodedValue);
         }
 

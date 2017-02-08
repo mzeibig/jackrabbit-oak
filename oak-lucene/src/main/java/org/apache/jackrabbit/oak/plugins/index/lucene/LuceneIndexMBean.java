@@ -31,6 +31,12 @@ public interface LuceneIndexMBean {
 
     TabularData getIndexStats() throws IOException;
 
+    TabularData getBadIndexStats();
+
+    TabularData getBadPersistedIndexStats();
+
+    boolean isFailing();
+
     @Description("Determines the set of index paths upto given maxLevel. This can be used to determine the value for" +
             "[includedPaths]. For this to work you should have [evaluatePathRestrictions] set to true in your index " +
             "definition")
@@ -47,5 +53,20 @@ public interface LuceneIndexMBean {
             @Name("maxPathCount")
             int maxPathCount
             ) throws IOException;
+
+    @Description("Retrieves the fields, and number of documents for each field, for an index. " +
+            "This allows to investigate what is stored in the index.")
+    String[] getFieldInfo(
+            @Name("indexPath")
+            @Description("The index path (empty for all indexes)")
+                    String indexPath
+    ) throws IOException;
+
+    @Description("Returns the stored index definition for index at given path in string form")
+    String getStoredIndexDefinition(@Name("indexPath") String indexPath);
+
+    @Description("Returns the diff of index definition for index at given path from the stored index definition in " +
+            "string form")
+    String diffStoredIndexDefinition(@Name("indexPath") String indexPath);
 
 }

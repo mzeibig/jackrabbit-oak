@@ -61,11 +61,8 @@ public interface GCMonitor {
 
     /**
      * The compaction phase of the garbage collection process terminated successfully.
-     * @param segmentCounts    number of segments in the individual generations of the map
-     * @param recordCounts     number of records in the individual generations of the map
-     * @param compactionMapWeights   weights of the individual generations of the map
      */
-    void compacted(long[] segmentCounts, long[] recordCounts, long[] compactionMapWeights);
+    void compacted();
 
     /**
      * The cleanup phase of the garbage collection process terminated successfully.
@@ -73,13 +70,20 @@ public interface GCMonitor {
      * @param currentSize    number of bytes after garbage collection
      */
     void cleaned(long reclaimedSize, long currentSize);
+    
+    /**
+     * The garbage collection entered a new phase e.g. idle, estimation, etc.
+     * @param status short summary of the GC phase
+     */
+    void updateStatus(String status);
 
     class Empty implements GCMonitor {
         @Override public void info(String message, Object[] arguments) { }
         @Override public void warn(String message, Object[] arguments) { }
         @Override public void error(String message, Exception e) { }
         @Override public void skipped(String reason, Object[] arguments) { }
-        @Override public void compacted(long[] segmentCounts, long[] recordCounts, long[] compactionMapWeights) { }
+        @Override public void compacted() { }
         @Override public void cleaned(long reclaimedSize, long currentSize) { }
+        @Override public void updateStatus(String status) { }
     }
 }

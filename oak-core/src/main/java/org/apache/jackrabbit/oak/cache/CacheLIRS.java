@@ -78,7 +78,8 @@ public class CacheLIRS<K, V> implements LoadingCache<K, V> {
     static final Logger LOG = LoggerFactory.getLogger(CacheLIRS.class);
     static final ThreadLocal<Integer> CURRENTLY_LOADING = new ThreadLocal<Integer>();
     private static final AtomicInteger NEXT_CACHE_ID = new AtomicInteger();
-
+    private static final boolean PUT_HOT = Boolean.parseBoolean(System.getProperty("oak.cacheLIRS.putHot", "true"));
+    
     /**
      * Listener for items that are evicted from the cache. The listener
      * is called for both, resident and non-resident items. In the
@@ -1137,9 +1138,12 @@ public class CacheLIRS<K, V> implements LoadingCache<K, V> {
             }
             V old;
             Entry<K, V> e = find(key, hash);
+            boolean existed;
             if (e == null) {
+                existed = false;
                 old = null;
             } else {
+                existed = true;
                 old = e.value;
                 invalidate(key, hash, RemovalCause.REPLACED);
             }
@@ -1160,6 +1164,12 @@ public class CacheLIRS<K, V> implements LoadingCache<K, V> {
             mapSize++;
             // added entries are always added to the stack
             addToStack(e);
+            if (existed) {
+                // if it was there before (even non-resident), it becomes hot
+                if (PUT_HOT) {
+                    access(key, hash);
+                }
+            }
             return old;
         }
 
@@ -1585,6 +1595,15 @@ public class CacheLIRS<K, V> implements LoadingCache<K, V> {
             return this;
         }
 
+        /**
+         * How many other item are to be moved to the top of the stack before
+         * the current item is moved. The default is 16. Using higher values
+         * will avoid re-ordering in many cases, so less time is spent
+         * reordering. But this somewhat reduces cache hit rate, and eviction
+         * will become more random. Typically, cache hit rate can be improved by
+         * using smaller values, and access performance can be improved using
+         * larger values. Using values larger than 128 is not recommended.
+         */
         public Builder<K, V> stackMoveDistance(int stackMoveDistance) {
             if (stackMoveDistance < 0) {
                 LOG.warn("Illegal stack move distance: " + stackMoveDistance + ", using 16");

@@ -20,21 +20,17 @@
 package org.apache.jackrabbit.oak.segment;
 
 import static org.apache.commons.io.FileUtils.byteCountToDisplaySize;
-import static org.apache.jackrabbit.oak.commons.FixturesHelper.Fixture.SEGMENT_TAR;
-import static org.apache.jackrabbit.oak.commons.FixturesHelper.getFixtures;
 import static org.apache.jackrabbit.oak.plugins.blob.datastore.SharedDataStoreUtils.SharedStoreRecordType.REPOSITORY;
 import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.defaultGCOptions;
 import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assume.assumeTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.Date;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -53,7 +49,6 @@ import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
-import com.google.common.io.Closeables;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.filefilter.FileFilterUtils;
 import org.apache.jackrabbit.oak.api.Blob;
@@ -78,7 +73,6 @@ import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.stats.DefaultStatisticsProvider;
 import org.junit.After;
-import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -89,26 +83,46 @@ import org.slf4j.LoggerFactory;
  * Tests for SegmentNodeStore DataStore GC
  */
 public class SegmentDataStoreBlobGCIT {
+
     private static final Logger log = LoggerFactory.getLogger(SegmentDataStoreBlobGCIT.class);
 
-    SegmentNodeStore nodeStore;
-    FileStore store;
-    DataStoreBlobStore blobStore;
-    Date startDate;
-    SegmentGCOptions gcOptions = defaultGCOptions();
+    private static InputStream randomStream(int seed, int size) {
+        Random r = new Random(seed);
+        byte[] data = new byte[size];
+        r.nextBytes(data);
+        return new ByteArrayInputStream(data);
+    }
+
+    private SegmentNodeStore nodeStore;
+
+    private FileStore store;
+
+    private DataStoreBlobStore blobStore;
+
+    private SegmentGCOptions gcOptions = defaultGCOptions();
 
     @Rule
     public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
-    @BeforeClass
-    public static void assumptions() {
-        assumeTrue(getFixtures().contains(SEGMENT_TAR));
+    @After
+    public void closeFileStore() throws Exception {
+        if (store != null) {
+            store.close();
+        }
     }
 
-    protected SegmentNodeStore getNodeStore(BlobStore blobStore) throws Exception {
+    @After
+    public void closeBlobStore() throws Exception {
+        if (blobStore != null) {
+            blobStore.close();
+        }
+    }
+
+    private SegmentNodeStore getNodeStore(BlobStore blobStore) throws Exception {
         if (nodeStore == null) {
             ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
             FileStoreBuilder builder = fileStoreBuilder(getWorkDir())
+                    .withNodeDeduplicationCacheSize(16384)
                     .withBlobStore(blobStore)
                     .withMaxFileSize(256)
                     .withMemoryMapping(false)
@@ -128,17 +142,20 @@ public class SegmentDataStoreBlobGCIT {
         return setUp(10);
     }
 
+    protected DataStoreBlobStore getBlobStore(File folder) throws Exception {
+        return DataStoreUtils.getBlobStore(folder);
+    }
+
     public DataStoreState setUp(int count) throws Exception {
         if (blobStore == null) {
-            blobStore = DataStoreUtils.getBlobStore(folder.newFolder());
+            blobStore = getBlobStore(folder.newFolder());
         }
         nodeStore = getNodeStore(blobStore);
-        startDate = new Date();
-        
+
         NodeBuilder a = nodeStore.getRoot().builder();
 
         /* Create garbage by creating in-lined blobs (size < 16KB) */
-        int number = 4000;
+        int number = 500;
         NodeBuilder content = a.child("content");
         for (int i = 0; i < number; i++) {
             NodeBuilder c = content.child("x" + i);
@@ -153,7 +170,7 @@ public class SegmentDataStoreBlobGCIT {
 
         // 2. Now remove the nodes to generate garbage
         content = a.child("content");
-        for (int i = 0; i < 2000; i++) {
+        for (int i = 0; i < 100; i++) {
             NodeBuilder c = content.child("x" + i);
             for (int j = 0; j < 5; j++) {
                 c.removeProperty("p" + j);
@@ -265,7 +282,7 @@ public class SegmentDataStoreBlobGCIT {
             .filter(Level.TRACE)
             .create();
 
-        DataStoreState state = setUp(30000);
+        DataStoreState state = setUp(10);
         log.info("{} blobs available : {}", state.blobsPresent.size(), state.blobsPresent);
         customLogs.starting();
         ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(10);
@@ -384,27 +401,6 @@ public class SegmentDataStoreBlobGCIT {
         assertEquals(0, candidates);
     }
 
-    private static void assertBlobReferenceRecords(Set<String> expected, String rootFolder) throws IOException {
-        // Read the marked files to check if paths logged or not
-        File root = new File(rootFolder);
-        List<File> rootFile = FileFilterUtils.filterList(
-            FileFilterUtils.prefixFileFilter("gcworkdir-"),
-            root.listFiles());
-        List<File> markedFiles = FileFilterUtils.filterList(
-            FileFilterUtils.prefixFileFilter("marked-"),
-            rootFile.get(0).listFiles());
-        InputStream is = null;
-        try {
-            is = new FileInputStream(markedFiles.get(0));
-            Set<String> records = FileIOUtils.readStringsAsSet(is, true);
-            assertEquals(expected.size(), records.size());
-            assertEquals(expected, records);
-        } finally {
-            Closeables.close(is, false);
-            FileUtils.forceDelete(rootFile.get(0));
-        }
-    }
-
     private Set<String> gcInternal(long maxBlobGcInSecs) throws Exception {
         ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(10);
         MarkSweepGarbageCollector gc = init(maxBlobGcInSecs, executor);
@@ -416,11 +412,31 @@ public class SegmentDataStoreBlobGCIT {
         return existingAfterGC;
     }
 
-    private MarkSweepGarbageCollector init(long blobGcMaxAgeInSecs, ThreadPoolExecutor executor) throws Exception {
+    private static void assertBlobReferenceRecords(Set<String> expected, String rootFolder) throws IOException {
+        // Read the marked files to check if paths logged or not
+        File root = new File(rootFolder);
+        List<File> rootFile = FileFilterUtils.filterList(
+            FileFilterUtils.prefixFileFilter("gcworkdir-"),
+            root.listFiles());
+        List<File> markedFiles = FileFilterUtils.filterList(
+            FileFilterUtils.prefixFileFilter("marked-"),
+            rootFile.get(0).listFiles());
+        try (InputStream is = new FileInputStream(markedFiles.get(0))) {
+                Set<String> records = FileIOUtils.readStringsAsSet(is, true);
+                assertEquals(expected.size(), records.size());
+                assertEquals(expected, records);
+        } finally {
+            FileUtils.forceDelete(rootFile.get(0));
+        }
+    }
+
+    private MarkSweepGarbageCollector init(long blobGcMaxAgeInSecs, ThreadPoolExecutor executor)
+        throws Exception {
         return init(blobGcMaxAgeInSecs, executor, folder.newFolder().getAbsolutePath());
     }
 
-    private MarkSweepGarbageCollector init(long blobGcMaxAgeInSecs, ThreadPoolExecutor executor, String root) throws Exception {
+    private MarkSweepGarbageCollector init(long blobGcMaxAgeInSecs, ThreadPoolExecutor executor,
+        String root) throws Exception {
         String repoId = null;
         if (SharedDataStoreUtils.isShared(store.getBlobStore())) {
             repoId = ClusterRepositoryInfo.getOrCreateId(nodeStore);
@@ -428,14 +444,14 @@ public class SegmentDataStoreBlobGCIT {
                 new ByteArrayInputStream(new byte[0]), 
                 REPOSITORY.getNameFromId(repoId));
         }
-        MarkSweepGarbageCollector gc = new MarkSweepGarbageCollector(
-            new SegmentBlobReferenceRetriever(store),
-            (GarbageCollectableBlobStore) store.getBlobStore(), executor, root, 2048, blobGcMaxAgeInSecs,
-            repoId);
+        MarkSweepGarbageCollector gc =
+            new MarkSweepGarbageCollector(new SegmentBlobReferenceRetriever(store),
+                (GarbageCollectableBlobStore) store.getBlobStore(), executor,
+                root, 2048, blobGcMaxAgeInSecs, repoId);
         return gc;
     }    
 
-    protected Set<String> iterate() throws Exception {
+    private Set<String> iterate() throws Exception {
         Iterator<String> cur = blobStore.getAllChunkIds(0);
 
         Set<String> existing = Sets.newHashSet();
@@ -445,32 +461,21 @@ public class SegmentDataStoreBlobGCIT {
         return existing;
     }
 
-    @After
-    public void close() throws Exception {
-        if (store != null) {
-            store.close();
-        }
-        DataStoreUtils.cleanup(blobStore.getDataStore(), startDate);
-    }
-
-    static InputStream randomStream(int seed, int size) {
-        Random r = new Random(seed);
-        byte[] data = new byte[size];
-        r.nextBytes(data);
-        return new ByteArrayInputStream(data);
-    }
-    
     /**
     * Waits for some time and adds additional blobs after blob referenced identified to simulate
     * long running blob id collection phase.
      */
-    class TestGarbageCollector extends MarkSweepGarbageCollector {
-        long maxLastModifiedInterval;
-        String root;
-        GarbageCollectableBlobStore blobStore;
-        Set<String> additionalBlobs;
+    private class TestGarbageCollector extends MarkSweepGarbageCollector {
+
+        private long maxLastModifiedInterval;
+
+        private String root;
+
+        private GarbageCollectableBlobStore blobStore;
+
+        private Set<String> additionalBlobs;
         
-        public TestGarbageCollector(BlobReferenceRetriever marker, GarbageCollectableBlobStore blobStore,
+        TestGarbageCollector(BlobReferenceRetriever marker, GarbageCollectableBlobStore blobStore,
                                     Executor executor, String root, int batchCount, long maxLastModifiedInterval,
                                     @Nullable String repositoryId) throws IOException {
             super(marker, blobStore, executor, root, batchCount, maxLastModifiedInterval, repositoryId);
@@ -479,12 +484,10 @@ public class SegmentDataStoreBlobGCIT {
             this.maxLastModifiedInterval = maxLastModifiedInterval;
             this.additionalBlobs = Sets.newHashSet();
         }
-        
+
         @Override
-        protected void markAndSweep(boolean markOnly) throws Exception {
-            boolean threw = true;
-            GarbageCollectorFileState fs = new GarbageCollectorFileState(root);
-            try {
+        protected void markAndSweep(boolean markOnly, boolean forceBlobRetrieve) throws Exception {
+            try (GarbageCollectorFileState fs = new GarbageCollectorFileState(root)) {
                 Stopwatch sw = Stopwatch.createStarted();
                 LOG.info("Starting Test Blob garbage collection");
                 
@@ -501,21 +504,16 @@ public class SegmentDataStoreBlobGCIT {
                 if (!markOnly) {
                     Thread.sleep(maxLastModifiedInterval + 100);
                     LOG.info("Slept {} to make additional blobs old", maxLastModifiedInterval + 100);
-                    
-                    long deleteCount = sweep(fs, markStart);
-                    threw = false;
-                    
+
+                    long deleteCount = sweep(fs, markStart, forceBlobRetrieve);
+
                     LOG.info("Blob garbage collection completed in {}. Number of blobs deleted [{}]", sw.toString(),
                         deleteCount, maxLastModifiedInterval);
-                }
-            } finally {
-                if (!LOG.isTraceEnabled()) {
-                    Closeables.close(fs, threw);
                 }
             }
         }
         
-        public HashSet<String> createAdditional() throws Exception {
+        private HashSet<String> createAdditional() throws Exception {
             HashSet<String> blobSet = new HashSet<String>();
             NodeBuilder a = nodeStore.getRoot().builder();
             int number = 5;
@@ -535,5 +533,6 @@ public class SegmentDataStoreBlobGCIT {
             return blobSet;
         }
     }
+
 }
 

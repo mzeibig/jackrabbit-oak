@@ -32,8 +32,12 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class BulkCreateOrUpdateClusterTest extends AbstractMultiDocumentStoreTest {
+    
+    final Logger logger = LoggerFactory.getLogger(getClass());
 
     public BulkCreateOrUpdateClusterTest(DocumentStoreFixture dsf) {
         super(dsf);
@@ -53,7 +57,6 @@ public class BulkCreateOrUpdateClusterTest extends AbstractMultiDocumentStoreTes
         for (int i = 0; i < amount; i += 2) {
             String id = this.getClass().getName() + ".testConcurrentNoConflict" + i;
             UpdateOp up = new UpdateOp(id, true);
-            up.set("_id", id);
             up.set("prop", 100);
             updates.add(up);
         }
@@ -68,7 +71,6 @@ public class BulkCreateOrUpdateClusterTest extends AbstractMultiDocumentStoreTes
             for (int j = 0; j < amountPerThread; j++) {
                 String id = this.getClass().getName() + ".testConcurrentNoConflict" + (j + i * amountPerThread);
                 UpdateOp up = new UpdateOp(id, true);
-                up.set("_id", id);
                 up.set("prop", 200 + i + j);
                 threadUpdates.add(up);
                 removeMe.add(id);
@@ -138,7 +140,6 @@ public class BulkCreateOrUpdateClusterTest extends AbstractMultiDocumentStoreTes
         for (int i = 0; i < amount; i += 2) {
             String id = this.getClass().getName() + ".testConcurrentNoConflict" + i;
             UpdateOp up = new UpdateOp(id, true);
-            up.set("_id", id);
             up.set("prop", 100);
             updates.add(up);
             removeMe.add(id);
@@ -153,7 +154,6 @@ public class BulkCreateOrUpdateClusterTest extends AbstractMultiDocumentStoreTes
             for (int j = 0; j < amount; j++) {
                 String id = this.getClass().getName() + ".testConcurrentWithConflict" + j;
                 UpdateOp up = new UpdateOp(id, true);
-                up.set("_id", id);
                 up.set("prop", 200 + i * amount + j);
                 threadUpdates.add(up);
                 removeMe.add(id);
@@ -175,7 +175,10 @@ public class BulkCreateOrUpdateClusterTest extends AbstractMultiDocumentStoreTes
             t.start();
         }
         for (Thread t : threads) {
-            t.join(10000);
+            long time = System.currentTimeMillis();
+            t.join(75000);
+            time = System.currentTimeMillis() - time;
+            logger.info("join took " + time + " ms");
             if (t.isAlive()) {
                 fail("Thread hasn't finished in 10s");
             }

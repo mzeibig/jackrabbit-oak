@@ -53,6 +53,7 @@ import org.apache.jackrabbit.oak.spi.security.authentication.external.SyncExcept
 import org.apache.jackrabbit.oak.spi.security.authentication.external.SyncResult;
 import org.apache.jackrabbit.oak.spi.security.authentication.external.SyncedIdentity;
 import org.apache.jackrabbit.oak.spi.security.authentication.external.TestIdentityProvider;
+import org.apache.jackrabbit.oak.spi.security.authentication.external.impl.ExternalIdentityConstants;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -348,6 +349,66 @@ public class DefaultSyncContextTest extends AbstractExternalAuthTest {
     }
 
     @Test
+    public void testSyncExternalForeignLocalUser() throws Exception {
+        ExternalUser external = idp.listUsers().next();
+        syncCtx.sync(external);
+
+        User u = userManager.getAuthorizable(external.getId(), User.class);
+        setExternalID(u, "differentIDP");
+
+        SyncResult result = syncCtx.sync(external);
+        assertEquals(SyncResult.Status.FOREIGN, result.getStatus());
+        SyncedIdentity si = result.getIdentity();
+        assertNotNull(si);
+        assertEquals(external.getExternalId(), si.getExternalIdRef());
+    }
+
+    @Test
+    public void testSyncExternalToForeignLocalGroup() throws Exception {
+        ExternalGroup external = idp.listGroups().next();
+        syncCtx.sync(external);
+
+        Group gr = userManager.getAuthorizable(external.getId(), Group.class);
+        setExternalID(gr, "differentIDP");
+
+        SyncResult result = syncCtx.sync(external);
+        assertEquals(SyncResult.Status.FOREIGN, result.getStatus());
+        SyncedIdentity si = result.getIdentity();
+        assertNotNull(si);
+        assertEquals(external.getExternalId(), si.getExternalIdRef());
+    }
+
+    @Test
+    public void testSyncExternalToExistingLocalUser() throws Exception {
+        ExternalUser external = idp.listUsers().next();
+        syncCtx.sync(external);
+
+        User u = userManager.getAuthorizable(external.getId(), User.class);
+        u.removeProperty(ExternalIdentityConstants.REP_EXTERNAL_ID);
+
+        SyncResult result = syncCtx.sync(external);
+        assertEquals(SyncResult.Status.FOREIGN, result.getStatus());
+        SyncedIdentity si = result.getIdentity();
+        assertNotNull(si);
+        assertEquals(external.getExternalId(), si.getExternalIdRef());
+    }
+
+    @Test
+    public void testSyncExternalToExistingLocalGroup() throws Exception {
+        ExternalGroup external = idp.listGroups().next();
+        syncCtx.sync(external);
+
+        Group gr = userManager.getAuthorizable(external.getId(), Group.class);
+        gr.removeProperty(ExternalIdentityConstants.REP_EXTERNAL_ID);
+
+        SyncResult result = syncCtx.sync(external);
+        assertEquals(SyncResult.Status.FOREIGN, result.getStatus());
+        SyncedIdentity si = result.getIdentity();
+        assertNotNull(si);
+        assertEquals(external.getExternalId(), si.getExternalIdRef());
+    }
+
+    @Test
     public void testSyncUserById() throws Exception {
         ExternalIdentity externalId = idp.listUsers().next();
 
@@ -383,6 +444,71 @@ public class DefaultSyncContextTest extends AbstractExternalAuthTest {
         assertEquals(SyncResult.Status.DELETE, result.getStatus());
 
         assertNull(userManager.getAuthorizable(userId));
+    }
+
+    @Test
+    public void testSyncDisabledUserById() throws Exception {
+        // configure to disable missing users
+        syncConfig.user().setDisableMissing(true);
+
+        // mark a regular repo user as external user from the test IDP
+        User u = userManager.createUser("test" + UUID.randomUUID(), null);
+        String userId = u.getID();
+        setExternalID(u, idp.getName());
+
+        // test sync with 'keepmissing' = true
+        syncCtx.setKeepMissing(true);
+        SyncResult result = syncCtx.sync(userId);
+        assertEquals(SyncResult.Status.MISSING, result.getStatus());
+        assertNotNull(userManager.getAuthorizable(userId));
+
+        // test sync with 'keepmissing' = false
+        syncCtx.setKeepMissing(false);
+        result = syncCtx.sync(userId);
+        assertEquals(SyncResult.Status.DISABLE, result.getStatus());
+
+        Authorizable authorizable = userManager.getAuthorizable(userId);
+        assertNotNull(authorizable);
+        assertTrue(((User)authorizable).isDisabled());
+
+        // add external user back
+        addIDPUser(userId);
+
+        result = syncCtx.sync(userId);
+        assertEquals(SyncResult.Status.ENABLE, result.getStatus());
+        assertNotNull(userManager.getAuthorizable(userId));
+        assertFalse(((User)authorizable).isDisabled());
+    }
+
+    @Test
+    public void testSyncDoesNotEnableUsers() throws Exception {
+        // configure to remove missing users, check that sync does not mess with disabled status
+        syncConfig.user().setDisableMissing(false);
+        // test sync with 'keepmissing' = false
+        syncCtx.setKeepMissing(false);
+
+        ExternalUser user = idp.listUsers().next();
+        assertNotNull(user);
+
+        SyncResult result = syncCtx.sync(user);
+        assertEquals(SyncResult.Status.ADD, result.getStatus());
+
+        Authorizable authorizable = userManager.getAuthorizable(user.getId());
+        assertTrue(authorizable instanceof User);
+        User u = (User) authorizable;
+
+        // disable user
+        u.disable("disabled locally");
+        root.commit();
+
+        // sync
+        syncCtx.setForceUserSync(true);
+        result = syncCtx.sync(user.getId());
+        assertEquals(SyncResult.Status.UPDATE, result.getStatus());
+        authorizable = userManager.getAuthorizable(user.getId());
+        assertNotNull(authorizable);
+        assertTrue(authorizable instanceof User);
+        assertTrue(((User)authorizable).isDisabled());
     }
 
     @Test

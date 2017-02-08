@@ -27,15 +27,19 @@ import static org.apache.jackrabbit.JcrConstants.JCR_DATA;
 import static org.apache.jackrabbit.oak.api.Type.BINARIES;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.INDEX_DATA_CHILD_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.OakDirectory.PROP_BLOB_SIZE;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.OakDirectory.UNIQUE_KEY_SIZE;
 import static org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent.INITIAL_CONTENT;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
@@ -43,12 +47,12 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.io.input.NullInputStream;
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.api.Type;
-import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
 import org.apache.jackrabbit.oak.plugins.memory.ArrayBasedBlob;
 import org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState;
 import org.apache.jackrabbit.oak.plugins.memory.PropertyStates;
@@ -83,21 +87,21 @@ public class OakDirectoryTest {
 
     @Test
     public void writes_DefaultSetup() throws Exception{
-        Directory dir = createDir(builder, false);
+        Directory dir = createDir(builder, false, "/foo");
         assertWrites(dir, IndexDefinition.DEFAULT_BLOB_SIZE);
     }
 
     @Test
     public void writes_CustomBlobSize() throws Exception{
         builder.setProperty(LuceneIndexConstants.BLOB_SIZE, 300);
-        Directory dir = createDir(builder, false);
+        Directory dir = createDir(builder, false, "/foo");
         assertWrites(dir, 300);
     }
 
     @Test
     public void testCompatibility() throws Exception{
         builder.setProperty(LuceneIndexConstants.BLOB_SIZE, OakDirectory.DEFAULT_BLOB_SIZE);
-        Directory dir = createDir(builder, false);
+        Directory dir = createDir(builder, false, "/foo");
         byte[] data = assertWrites(dir, OakDirectory.DEFAULT_BLOB_SIZE);
 
         NodeBuilder testNode = builder.child(INDEX_DATA_CHILD_NAME).child("test");
@@ -116,7 +120,7 @@ public class OakDirectoryTest {
 
     @Test //OAK-2388
     public void testOverflow() throws Exception{
-        Directory dir = createDir(builder, false);
+        Directory dir = createDir(builder, false, "/foo");
         NodeBuilder file = builder.child(INDEX_DATA_CHILD_NAME).child("test.txt");
         int blobSize = 32768;
         int dataSize = 90844;
@@ -135,7 +139,7 @@ public class OakDirectoryTest {
     @Test
     public void saveListing() throws Exception{
         builder.setProperty(LuceneIndexConstants.SAVE_DIR_LISTING, true);
-        Directory dir = createDir(builder, false);
+        Directory dir = createDir(builder, false, "/foo");
         Set<String> fileNames = newHashSet();
         for (int i = 0; i < 10; i++) {
             String fileName = "foo" + i;
@@ -144,8 +148,26 @@ public class OakDirectoryTest {
         }
         dir.close();
 
-        dir = createDir(builder, true);
+        dir = createDir(builder, true, "/foo");
         assertEquals(fileNames, newHashSet(dir.listAll()));
+    }
+
+    @Test
+    public void skipSaveListingIfUnchanged() throws Exception{
+        builder.setProperty(LuceneIndexConstants.SAVE_DIR_LISTING, true);
+        Directory dir = createDir(builder, false, "/foo");
+        Set<String> fileNames = newHashSet();
+        for (int i = 0; i < 10; i++) {
+            String fileName = "foo" + i;
+            createFile(dir, fileName);
+            fileNames.add(fileName);
+        }
+        dir.close();
+
+        dir = createDir(new ReadOnlyBuilder(builder.getNodeState()), false, "/foo");
+        Set<String> files =  newHashSet(dir.listAll());
+        dir.close();
+        assertEquals(fileNames, files);
     }
 
     byte[] assertWrites(Directory dir, int blobSize) throws IOException {
@@ -169,7 +191,7 @@ public class OakDirectoryTest {
         assertEquals(blobSize, testNode.getProperty(PROP_BLOB_SIZE).getValue(Type.LONG).longValue());
 
         List<Blob> blobs = newArrayList(testNode.getProperty(JCR_DATA).getValue(BINARIES));
-        assertEquals(blobSize + OakDirectory.UNIQUE_KEY_SIZE, blobs.get(0).length());
+        assertEquals(blobSize + UNIQUE_KEY_SIZE, blobs.get(0).length());
 
         return data;
     }
@@ -183,9 +205,9 @@ public class OakDirectoryTest {
         return size;
     }
 
-    private Directory createDir(NodeBuilder builder, boolean readOnly){
+    private OakDirectory createDir(NodeBuilder builder, boolean readOnly, String indexPath){
         return new OakDirectory(builder,
-                new IndexDefinition(root, builder.getNodeState()), readOnly);
+                new IndexDefinition(root, builder.getNodeState(), indexPath), readOnly);
     }
 
     byte[] randomBytes(int size) {
@@ -196,7 +218,7 @@ public class OakDirectoryTest {
 
     @Test
     public void testCloseOnOriginalIndexInput() throws Exception {
-        Directory dir = createDir(builder, false);
+        Directory dir = createDir(builder, false, "/foo");
         NodeBuilder file = builder.child(INDEX_DATA_CHILD_NAME).child("test.txt");
         int dataSize = 1024;
         List<? super Blob> blobs = new ArrayList<Blob>(dataSize);
@@ -211,7 +233,7 @@ public class OakDirectoryTest {
 
     @Test
     public void testCloseOnClonedIndexInputs() throws Exception {
-        Directory dir = createDir(builder, false);
+        Directory dir = createDir(builder, false, "/foo");
         NodeBuilder file = builder.child(INDEX_DATA_CHILD_NAME).child("test.txt");
         int dataSize = 1024;
         List<? super Blob> blobs = new ArrayList<Blob>(dataSize);
@@ -322,7 +344,7 @@ public class OakDirectoryTest {
                 .withBlobStore(new BlackHoleBlobStore())
                 .build();
         SegmentNodeStore nodeStore = SegmentNodeStore.builder(store).build();
-        IndexDefinition defn = new IndexDefinition(INITIAL_CONTENT, EmptyNodeState.EMPTY_NODE);
+        IndexDefinition defn = new IndexDefinition(INITIAL_CONTENT, EmptyNodeState.EMPTY_NODE, "/foo");
         Directory directory = new OakDirectory(nodeStore.getRoot().builder(), defn, false);
 
         long expectedSize = ONE_GB * 2 + ONE_MB;
@@ -338,8 +360,7 @@ public class OakDirectoryTest {
     @Test
     public void dirNameInExceptionMessage() throws Exception{
         String indexPath = "/foo/bar";
-        builder.setProperty(IndexConstants.INDEX_PATH, indexPath);
-        Directory dir = createDir(builder, false);
+        Directory dir = createDir(builder, false, indexPath);
 
         try {
             dir.openInput("foo.txt", IOContext.DEFAULT);
@@ -384,9 +405,8 @@ public class OakDirectoryTest {
         int blobSize = minFileSize + 1000;
 
         builder = nodeStore.getRoot().builder();
-        builder.setProperty(IndexConstants.INDEX_PATH, indexPath);
         builder.setProperty(LuceneIndexConstants.BLOB_SIZE, blobSize);
-        Directory dir = createDir(builder, false);
+        Directory dir = createDir(builder, false, indexPath);
 
         blobStore.startFailing();
         IndexOutput o = dir.createOutput("test1.txt", IOContext.DEFAULT);
@@ -418,8 +438,64 @@ public class OakDirectoryTest {
     @Test
     public void readOnlyDirectory() throws Exception{
         Directory dir = new OakDirectory(new ReadOnlyBuilder(builder.getNodeState()),
-                new IndexDefinition(root, builder.getNodeState()), true);
+                new IndexDefinition(root, builder.getNodeState(), "/foo"), true);
         assertEquals(0, dir.listAll().length);
+    }
+
+    @Test
+    public void testDirty() throws Exception{
+        OakDirectory dir = createDir(builder, false, "/foo");
+        assertFalse(dir.isDirty());
+        createFile(dir, "a");
+        assertTrue(dir.isDirty());
+        dir.close();
+
+        dir = createDir(builder, false, "/foo");
+        assertFalse(dir.isDirty());
+        dir.openInput("a", IOContext.DEFAULT);
+        assertFalse(dir.isDirty());
+        dir.deleteFile("a");
+        assertTrue(dir.isDirty());
+        dir.close();
+    }
+
+    @Test
+    public void blobFactory() throws Exception {
+        final AtomicInteger numBlobs = new AtomicInteger();
+        final int fileSize = 1024;
+        IndexDefinition def = new IndexDefinition(root, builder.getNodeState(), "/foo");
+        OakDirectory.BlobFactory factory = new OakDirectory.BlobFactory() {
+            @Override
+            public Blob createBlob(InputStream in) throws IOException {
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                IOUtils.copy(in, out);
+                byte[] data = out.toByteArray();
+                assertEquals(fileSize + UNIQUE_KEY_SIZE, data.length);
+                numBlobs.incrementAndGet();
+                return new ArrayBasedBlob(data);
+            }
+        };
+        OakDirectory dir = new OakDirectory(builder, INDEX_DATA_CHILD_NAME, def, false, factory);
+        numBlobs.set(0);
+        writeFile(dir, "file", fileSize);
+        assertEquals(1, numBlobs.get());
+        dir.close();
+    }
+
+    @Test
+    public void fileLength() throws Exception {
+        final int fileSize = 1024;
+        final String fileName = "file";
+        OakDirectory dir = createDir(builder, false, "/foo");
+        writeFile(dir, fileName, fileSize);
+        assertEquals(fileSize, dir.fileLength(fileName));
+        try {
+            dir.fileLength("unknown");
+            fail("must throw FileNotFoundException");
+        } catch (FileNotFoundException expected) {
+            // expected
+        }
+        dir.close();
     }
 
     private static void readInputToEnd(long expectedSize, IndexInput input) throws IOException {

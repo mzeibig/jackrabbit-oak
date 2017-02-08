@@ -276,7 +276,8 @@ public abstract class AbstractQueryTest {
             lines.add(e.toString());
         }
         time = System.currentTimeMillis() - time;
-        if (time > 10000 && !isDebugModeEnabled()) {
+        if (time > 5 * 60 * 1000 && !isDebugModeEnabled()) {
+            // more than 5 minutes
             fail("Query took too long: " + query + " took " + time + " ms");
         }
         return lines;
@@ -321,7 +322,7 @@ public abstract class AbstractQueryTest {
             assertTrue("Expected path " + p + " not found, got " + actual, checkNotNull(actual)
                 .contains(p));
         }
-        assertEquals("Result set size is different", expected.size(),
+        assertEquals("Result set size is different: " + actual, expected.size(),
                 actual.size());
     }
 

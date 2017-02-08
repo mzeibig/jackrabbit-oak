@@ -60,7 +60,6 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import javax.management.InstanceAlreadyExistsException;
 import javax.management.MBeanRegistrationException;
 import javax.management.MBeanServer;
-import javax.management.MalformedObjectNameException;
 import javax.management.NotCompliantMBeanException;
 import javax.management.ObjectName;
 
@@ -714,8 +713,8 @@ public class SegmentCompactionIT {
         }
 
         @Override
-        public void compacted(long[] segmentCounts, long[] recordCounts, long[] compactionMapWeights) {
-            delegate.compacted(segmentCounts, recordCounts, compactionMapWeights);
+        public void compacted() {
+            delegate.compacted();
             lastCompacted = System.currentTimeMillis();
         }
 
@@ -723,6 +722,11 @@ public class SegmentCompactionIT {
         public void cleaned(long reclaimedSize, long currentSize) {
             cleaned = true;
             delegate.cleaned(reclaimedSize, currentSize);
+        }
+        
+        @Override
+        public void updateStatus(String status) {
+            delegate.updateStatus(status);
         }
 
         public boolean isCleaned() {
@@ -736,6 +740,7 @@ public class SegmentCompactionIT {
         public long getLastCompacted() {
             return lastCompacted;
         }
+
     }
 
     private class SegmentCompactionITMBean extends AnnotatedStandardMBean implements SegmentCompactionMBean {

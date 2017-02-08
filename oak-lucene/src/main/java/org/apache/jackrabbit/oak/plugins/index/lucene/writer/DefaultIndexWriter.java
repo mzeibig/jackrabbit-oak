@@ -21,6 +21,7 @@ package org.apache.jackrabbit.oak.plugins.index.lucene.writer;
 
 import java.io.IOException;
 import java.util.Calendar;
+import java.util.List;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -31,11 +32,13 @@ import org.apache.jackrabbit.oak.plugins.index.lucene.IndexCopier;
 import org.apache.jackrabbit.oak.plugins.index.lucene.IndexDefinition;
 import org.apache.jackrabbit.oak.plugins.index.lucene.OakDirectory;
 import org.apache.jackrabbit.oak.plugins.index.lucene.util.SuggestHelper;
+import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.util.PerfLogger;
 import org.apache.jackrabbit.util.ISO8601;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.IndexableField;
@@ -45,7 +48,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static com.google.common.base.Preconditions.checkNotNull;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.SUGGEST_DATA_CHILD_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.TermFactory.newPathTerm;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.writer.IndexWriterUtils.getIndexWriterConfig;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.writer.IndexWriterUtils.newIndexDirectory;
@@ -63,20 +65,32 @@ class DefaultIndexWriter implements LuceneIndexWriter {
     private final boolean reindex;
     private IndexWriter writer;
     private Directory directory;
+    private GarbageCollectableBlobStore blobStore;
+    private long genAtStart = -1;
+    private boolean indexUpdated = false;
 
     public DefaultIndexWriter(IndexDefinition definition, NodeBuilder definitionBuilder,
-                              @Nullable IndexCopier indexCopier, String dirName, String suggestDirName, boolean reindex){
+        @Nullable IndexCopier indexCopier, String dirName, String suggestDirName,
+        boolean reindex, @Nullable GarbageCollectableBlobStore blobStore) {
         this.definition = definition;
         this.definitionBuilder = definitionBuilder;
         this.indexCopier = indexCopier;
         this.dirName = dirName;
         this.suggestDirName = suggestDirName;
         this.reindex = reindex;
+        this.blobStore = blobStore;
+    }
+
+    public DefaultIndexWriter(IndexDefinition definition, NodeBuilder definitionBuilder,
+                              @Nullable IndexCopier indexCopier, String dirName, String suggestDirName,
+                              boolean reindex) {
+        this(definition, definitionBuilder, indexCopier, dirName, suggestDirName, reindex, null);
     }
 
     @Override
     public void updateDocument(String path, Iterable<? extends IndexableField> doc) throws IOException {
         getWriter().updateDocument(newPathTerm(path), doc);
+        indexUpdated = true;
     }
 
     @Override
@@ -87,6 +101,7 @@ class DefaultIndexWriter implements LuceneIndexWriter {
 
     void deleteAll() throws IOException {
         getWriter().deleteAll();
+        indexUpdated = true;
     }
 
     @Override
@@ -95,7 +110,6 @@ class DefaultIndexWriter implements LuceneIndexWriter {
         //it indicates that the index is empty. In such a case trigger
         //creation of write such that an empty Lucene index state is persisted
         //in directory
-        boolean indexUpdated = false;
         if (reindex && writer == null){
             getWriter();
         }
@@ -109,7 +123,6 @@ class DefaultIndexWriter implements LuceneIndexWriter {
         }
 
         if (writer != null) {
-            indexUpdated = true;
             if (log.isTraceEnabled()) {
                 trackIndexSizeInfo(writer, definition, directory);
             }
@@ -117,12 +130,17 @@ class DefaultIndexWriter implements LuceneIndexWriter {
             final long start = PERF_LOGGER.start();
 
             if (updateSuggestions) {
-                updateSuggester(writer.getAnalyzer(), currentTime);
+                indexUpdated |= updateSuggester(writer.getAnalyzer(), currentTime, blobStore);
                 PERF_LOGGER.end(start, -1, "Completed suggester for directory {}", definition);
             }
 
             writer.close();
             PERF_LOGGER.end(start, -1, "Closed writer for directory {}", definition);
+
+            if (!indexUpdated){
+                long genAtEnd = getLatestGeneration(directory);
+                indexUpdated = genAtEnd != genAtStart;
+            }
 
             directory.close();
             PERF_LOGGER.end(start, -1, "Closed directory for directory {}", definition);
@@ -135,7 +153,7 @@ class DefaultIndexWriter implements LuceneIndexWriter {
     private IndexWriter getWriter() throws IOException {
         if (writer == null) {
             final long start = PERF_LOGGER.start();
-            directory = newIndexDirectory(definition, definitionBuilder, dirName);
+            directory = newIndexDirectory(definition, definitionBuilder, dirName, indexCopier != null, blobStore);
             IndexWriterConfig config;
             if (indexCopier != null){
                 directory = indexCopier.wrapForWrite(definition, directory, reindex, dirName);
@@ -144,6 +162,7 @@ class DefaultIndexWriter implements LuceneIndexWriter {
                 config = getIndexWriterConfig(definition, true);
             }
             writer = new IndexWriter(directory, config);
+            genAtStart = getLatestGeneration(directory);
             PERF_LOGGER.end(start, -1, "Created IndexWriter for directory {}", definition);
         }
         return writer;
@@ -153,20 +172,26 @@ class DefaultIndexWriter implements LuceneIndexWriter {
      * eventually update suggest dictionary
      * @throws IOException if suggest dictionary update fails
      * @param analyzer the analyzer used to update the suggester
+     * @param blobStore
      */
-    private void updateSuggester(Analyzer analyzer, Calendar currentTime) throws IOException {
+    private boolean updateSuggester(Analyzer analyzer, Calendar currentTime,
+        @Nullable GarbageCollectableBlobStore blobStore) throws IOException {
         NodeBuilder suggesterStatus = definitionBuilder.child(suggestDirName);
         DirectoryReader reader = DirectoryReader.open(writer, false);
-        final OakDirectory suggestDirectory = new OakDirectory(definitionBuilder, suggestDirName, definition, false);
+        final OakDirectory suggestDirectory =
+            new OakDirectory(definitionBuilder, suggestDirName, definition, false, blobStore);
+        boolean updated = false;
         try {
             SuggestHelper.updateSuggester(suggestDirectory, analyzer, reader);
             suggesterStatus.setProperty("lastUpdated", ISO8601.format(currentTime), Type.DATE);
         } catch (Throwable e) {
             log.warn("could not update suggester", e);
         } finally {
+            updated = suggestDirectory.isDirty();
             suggestDirectory.close();
             reader.close();
         }
+        return updated;
     }
 
     /**
@@ -212,6 +237,17 @@ class DefaultIndexWriter implements LuceneIndexWriter {
         } else {
             return true;
         }
+    }
+
+    private static long getLatestGeneration(Directory directory) throws IOException {
+        if (DirectoryReader.indexExists(directory)) {
+            List<IndexCommit> commits = DirectoryReader.listCommits(directory);
+            if (!commits.isEmpty()) {
+                //Look for that last commit as list is sorted from oldest to latest
+                return commits.get(commits.size() - 1).getGeneration();
+            }
+        }
+        return -1;
     }
 
     private static void trackIndexSizeInfo(@Nonnull IndexWriter writer,

@@ -20,33 +20,64 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 
-import com.google.common.base.Preconditions;
+import javax.annotation.CheckForNull;
+import javax.annotation.Nullable;
+
+import com.google.common.collect.Iterables;
 import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
+import org.apache.jackrabbit.oak.plugins.index.lucene.hybrid.NRTIndex;
+import org.apache.jackrabbit.oak.plugins.index.lucene.hybrid.NRTIndexFactory;
+import org.apache.jackrabbit.oak.plugins.index.lucene.hybrid.ReaderRefreshPolicy;
 import org.apache.jackrabbit.oak.plugins.index.lucene.reader.LuceneIndexReader;
 import org.apache.jackrabbit.oak.plugins.index.lucene.reader.LuceneIndexReaderFactory;
+import org.apache.jackrabbit.oak.plugins.index.lucene.writer.LuceneIndexWriter;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
+import org.apache.jackrabbit.oak.util.PerfLogger;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.MultiReader;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.suggest.analyzing.AnalyzingInfixSuggester;
 import org.apache.lucene.store.Directory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-class IndexNode {
+public class IndexNode {
+    /**
+     * Name of the hidden node under which information about the checkpoints
+     * seen and indexed by each async indexer is kept.
+     */
+    static final String ASYNC = ":async";
 
-    static IndexNode open(String indexPath, NodeState root, NodeState defnNodeState, LuceneIndexReaderFactory readerFactory)
+    private static final AtomicInteger INDEX_NODE_COUNTER = new AtomicInteger();
+
+    private static final PerfLogger PERF_LOGGER =
+            new PerfLogger(LoggerFactory.getLogger(IndexNode.class.getName() + ".perf"));
+
+    static IndexNode open(String indexPath, NodeState root, NodeState defnNodeState,
+                          LuceneIndexReaderFactory readerFactory, @Nullable NRTIndexFactory nrtFactory)
             throws IOException {
-        IndexDefinition definition = new IndexDefinition(root, defnNodeState);
+        IndexDefinition definition = new IndexDefinition(root, defnNodeState, indexPath);
         List<LuceneIndexReader> readers = readerFactory.createReaders(definition, defnNodeState, indexPath);
-        if (!readers.isEmpty()){
-            return new IndexNode(PathUtils.getName(indexPath), definition, readers);
+        NRTIndex nrtIndex = nrtFactory != null ? nrtFactory.createIndex(definition) : null;
+        if (!readers.isEmpty() || (nrtIndex != null && !hasAsyncIndexerRun(root))){
+            return new IndexNode(PathUtils.getName(indexPath), definition, readers, nrtIndex);
         }
         return null;
     }
+
+    static boolean hasAsyncIndexerRun(NodeState root) {
+        return root.hasChildNode(ASYNC);
+    }
+
+    private static final Logger log = LoggerFactory.getLogger(IndexNode.class);
 
     private final List<LuceneIndexReader> readers;
 
@@ -56,17 +87,35 @@ class IndexNode {
 
     private final ReadWriteLock lock = new ReentrantReadWriteLock();
 
-    private final IndexSearcher indexSearcher;
+    private volatile IndexSearcher indexSearcher;
+
+    private final NRTIndex nrtIndex;
+
+    private final ReaderRefreshPolicy refreshPolicy;
+
+    private final Runnable refreshCallback = new Runnable() {
+        @Override
+        public void run() {
+            refreshReaders();
+        }
+    };
 
     private boolean closed = false;
 
-    IndexNode(String name, IndexDefinition definition, List<LuceneIndexReader> readers)
+    private List<LuceneIndexReader> nrtReaders;
+
+    private final int indexNodeId = INDEX_NODE_COUNTER.incrementAndGet();
+
+    IndexNode(String name, IndexDefinition definition, List<LuceneIndexReader> readers, @Nullable NRTIndex nrtIndex)
             throws IOException {
-        checkArgument(!readers.isEmpty());
+        checkArgument(!readers.isEmpty() || nrtIndex != null);
         this.name = name;
         this.definition = definition;
         this.readers = readers;
-        this.indexSearcher = new IndexSearcher(createReader(readers));
+        this.nrtIndex = nrtIndex;
+        this.nrtReaders = getNRTReaders();
+        this.indexSearcher = new IndexSearcher(createReader(nrtReaders));
+        this.refreshPolicy = nrtIndex != null ? nrtIndex.getRefreshPolicy() : ReaderRefreshPolicy.NEVER;
     }
 
     String getName() {
@@ -77,16 +126,18 @@ class IndexNode {
         return definition;
     }
 
-    IndexSearcher getSearcher() {
+    public IndexSearcher getSearcher() {
         return indexSearcher;
     }
 
+    @CheckForNull
     Directory getSuggestDirectory() {
-        return getDefaultReader().getSuggestDirectory();
+        return readers.isEmpty() ? null : getDefaultReader().getSuggestDirectory();
     }
 
+    @CheckForNull
     AnalyzingInfixSuggester getLookup() {
-        return getDefaultReader().getLookup();
+        return readers.isEmpty() ? null : getDefaultReader().getLookup();
     }
 
     boolean acquire() {
@@ -95,12 +146,17 @@ class IndexNode {
             lock.readLock().unlock();
             return false;
         } else {
+            refreshPolicy.refreshOnReadIfRequired(refreshCallback);
             return true;
         }
     }
 
-    void release() {
+    public void release() {
         lock.readLock().unlock();
+    }
+
+    public int getIndexNodeId() {
+        return indexNodeId;
     }
 
     void close() throws IOException {
@@ -112,9 +168,37 @@ class IndexNode {
             lock.writeLock().unlock();
         }
 
-       for (LuceneIndexReader reader : readers){
+        //Do not close the NRTIndex here as it might be in use
+        //by newer IndexNode. Just close the readers obtained from
+        //them
+        for (LuceneIndexReader reader : Iterables.concat(readers, nrtReaders)){
            reader.close();
-       }
+        }
+    }
+
+    List<LuceneIndexReader> getPrimaryReaders() {
+        return readers;
+    }
+
+    @CheckForNull
+    public LuceneIndexWriter getLocalWriter() throws IOException{
+        return nrtIndex != null ? nrtIndex.getWriter() : null;
+    }
+
+    public void refreshReadersOnWriteIfRequired() {
+        refreshPolicy.refreshOnWriteIfRequired(refreshCallback);
+    }
+
+    private void refreshReaders(){
+        long start = PERF_LOGGER.start();
+        List<LuceneIndexReader> newNRTReaders = getNRTReaders();
+        //The list reference would differ if index got updated
+        //so if they are same no need to reinitialize the searcher
+        if (newNRTReaders != nrtReaders) {
+            nrtReaders = newNRTReaders;
+            indexSearcher = new IndexSearcher(createReader(nrtReaders));
+            PERF_LOGGER.end(start, 0, "Refreshed reader for index [{}]", definition);
+        }
     }
 
     private LuceneIndexReader getDefaultReader(){
@@ -122,14 +206,24 @@ class IndexNode {
         return readers.get(0);
     }
 
-    private IndexReader createReader(List<LuceneIndexReader> readers) {
-        if (readers.size() == 1){
+    private IndexReader createReader(List<LuceneIndexReader> nrtReaders) {
+        if (readers.size() == 1 && nrtReaders.isEmpty()){
             return readers.get(0).getReader();
         }
-        IndexReader[] readerArr = new IndexReader[readers.size()];
-        for (int i = 0; i < readerArr.length; i++) {
-            readerArr[i] = readers.get(i).getReader();
+        if (nrtReaders.size() == 1 && readers.isEmpty()){
+            return nrtReaders.get(0).getReader();
+        }
+        IndexReader[] readerArr = new IndexReader[readers.size() + nrtReaders.size()];
+        int i = 0;
+        for (LuceneIndexReader r : Iterables.concat(readers, nrtReaders)){
+            readerArr[i++] = r.getReader();
         }
         return new MultiReader(readerArr, true);
     }
+
+    List<LuceneIndexReader> getNRTReaders() {
+        return nrtIndex != null ? nrtIndex.getReaders() : Collections.<LuceneIndexReader>emptyList();
+    }
+
+
 }

@@ -85,6 +85,17 @@ public class SimpleMountInfoProvider implements MountInfoProvider {
     }
 
     @Override
+    public Collection<Mount> getMountsPlacedDirectlyUnder(String path) {
+        Collection<Mount> mounts = Lists.newArrayList();
+        for ( Mount mount : this.mounts.values()) {
+            if ( mount.isDirectlyUnder(path) ) {
+                mounts.add(mount);
+            }
+        }
+        return mounts;
+    }
+
+    @Override
     public Mount getDefaultMount() {
         return defMount;
     }
@@ -99,12 +110,12 @@ public class SimpleMountInfoProvider implements MountInfoProvider {
         private final List<Mount> mounts = Lists.newArrayListWithCapacity(1);
 
         public Builder mount(String name, String... paths) {
-            mounts.add(new MountInfo(name, false, false, asList(paths)));
+            mounts.add(new MountInfo(name, false, false, true, asList(paths)));
             return this;
         }
 
         public Builder readOnlyMount(String name, String... paths) {
-            mounts.add(new MountInfo(name, true, false, asList(paths)));
+            mounts.add(new MountInfo(name, true, false, true, asList(paths)));
             return this;
         }
 

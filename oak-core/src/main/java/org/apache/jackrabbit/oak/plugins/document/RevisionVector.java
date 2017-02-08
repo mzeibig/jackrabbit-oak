@@ -32,6 +32,8 @@ import com.google.common.collect.Sets;
 import com.google.common.primitives.Ints;
 import org.apache.jackrabbit.oak.cache.CacheValue;
 import org.apache.jackrabbit.oak.plugins.document.util.Utils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.Iterables.toArray;
@@ -50,6 +52,8 @@ import static java.util.Arrays.sort;
  * a given revision vector happened before or after another!
  */
 public final class RevisionVector implements Iterable<Revision>, Comparable<RevisionVector>, CacheValue {
+
+    private static final Logger log = LoggerFactory.getLogger(RevisionVector.class);
 
     private final static RevisionVector EMPTY = new RevisionVector();
 
@@ -326,13 +330,25 @@ public final class RevisionVector implements Iterable<Revision>, Comparable<Revi
             return "";
         }
         StringBuilder sb = new StringBuilder(len * Revision.REV_STRING_APPROX_SIZE + len - 1);
-        for (int i = 0; i < len; i++) {
+        return toStringBuilder(sb).toString();
+    }
+
+    /**
+     * Appends the string representation of this revision vector to the passed
+     * {@code StringBuilder}. The string representation is the same as returned
+     * by {@link #asString()}.
+     *
+     * @param sb the {@code StringBuilder} this revision vector is appended to.
+     * @return the passed {@code StringBuilder} object.
+     */
+    public StringBuilder toStringBuilder(StringBuilder sb) {
+        for (int i = 0; i < revisions.length; i++) {
             if (i > 0) {
                 sb.append(',');
             }
             revisions[i].toStringBuilder(sb);
         }
-        return sb.toString();
+        return sb;
     }
 
     /**
@@ -397,12 +413,27 @@ public final class RevisionVector implements Iterable<Revision>, Comparable<Revi
         return new RevisionVector(revs, false, false);
     }
 
+    /**
+     * Returns the dimensions of this revision vector. That is, the number of
+     * revision elements in this vector.
+     *
+     * @return the number of revision elements in this vector.
+     */
+    public int getDimensions() {
+        return revisions.length;
+    }
+
     //------------------------< CacheValue >------------------------------------
 
     @Override
     public int getMemory() {
-        return 32 // shallow size
-                + revisions.length * (Revision.SHALLOW_MEMORY_USAGE + 4);
+        long size = 32 // shallow size
+                      + (long)revisions.length * (Revision.SHALLOW_MEMORY_USAGE + 4);
+        if (size > Integer.MAX_VALUE) {
+            log.debug("Estimated memory footprint larger than Integer.MAX_VALUE: {}.", size);
+            size = Integer.MAX_VALUE;
+        }
+        return (int) size;
     }
 
     //------------------------< Comparable >------------------------------------

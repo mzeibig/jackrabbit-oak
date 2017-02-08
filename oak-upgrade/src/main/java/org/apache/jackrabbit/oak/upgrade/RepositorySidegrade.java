@@ -27,15 +27,14 @@ import javax.annotation.Nullable;
 import javax.jcr.RepositoryException;
 
 import com.google.common.base.Function;
-import org.apache.jackrabbit.oak.Oak;
+import org.apache.commons.lang.StringUtils;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
-import org.apache.jackrabbit.oak.commons.PathUtils;
-import org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent;
 import org.apache.jackrabbit.oak.spi.commit.CommitHook;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.CompositeEditorProvider;
 import org.apache.jackrabbit.oak.spi.commit.EditorHook;
 import org.apache.jackrabbit.oak.spi.lifecycle.RepositoryInitializer;
+import org.apache.jackrabbit.oak.spi.state.ApplyDiff;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
@@ -47,6 +46,7 @@ import org.apache.jackrabbit.oak.upgrade.nodestate.report.LoggingReporter;
 import org.apache.jackrabbit.oak.upgrade.nodestate.report.ReportingNodeState;
 import org.apache.jackrabbit.oak.upgrade.nodestate.NodeStateCopier;
 import org.apache.jackrabbit.oak.upgrade.version.VersionCopyConfiguration;
+import org.apache.jackrabbit.oak.upgrade.version.VersionHistoryUtil;
 import org.apache.jackrabbit.oak.upgrade.version.VersionableEditor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,6 +58,10 @@ import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Lists.transform;
 import static com.google.common.collect.Sets.union;
 import static java.util.Collections.sort;
+import static org.apache.jackrabbit.JcrConstants.JCR_PRIMARYTYPE;
+import static org.apache.jackrabbit.JcrConstants.JCR_SYSTEM;
+import static org.apache.jackrabbit.oak.spi.security.authorization.permission.PermissionConstants.NT_REP_PERMISSION_STORE;
+import static org.apache.jackrabbit.oak.spi.security.authorization.permission.PermissionConstants.REP_PERMISSION_STORE;
 import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.DEFAULT_EXCLUDE_PATHS;
 import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.DEFAULT_INCLUDE_PATHS;
 import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.DEFAULT_MERGE_PATHS;
@@ -67,10 +71,15 @@ import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.createTypeEdit
 import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.markIndexesToBeRebuilt;
 import static org.apache.jackrabbit.oak.upgrade.nodestate.NodeStateCopier.copyProperties;
 import static org.apache.jackrabbit.oak.upgrade.version.VersionCopier.copyVersionStorage;
+import static org.apache.jackrabbit.oak.upgrade.version.VersionHistoryUtil.getVersionStorage;
 
 public class RepositorySidegrade {
 
     private static final Logger LOG = LoggerFactory.getLogger(RepositorySidegrade.class);
+
+    private static final int LOG_NODE_COPY = Integer.getInteger("oak.upgrade.logNodeCopy", 10000);
+
+    private static final String WORKSPACE_NAME_PROP = "oak.upgrade.workspaceName";
 
     /**
      * Target node store.
@@ -98,7 +107,9 @@ public class RepositorySidegrade {
 
     private boolean filterLongNames = true;
 
-    private boolean skipInitialization = false;
+    private boolean verify = false;
+
+    private boolean onlyVerify = false;
 
     private List<CommitHook> customCommitHooks = null;
 
@@ -214,18 +225,18 @@ public class RepositorySidegrade {
         this.filterLongNames = filterLongNames;
     }
 
-    /**
-     * Skip the new repository initialization. Only copy content passed in the
-     * {@link #includePaths}.
-     *
-     * @param skipInitialization
-     */
-    public void setSkipInitialization(boolean skipInitialization) {
-        this.skipInitialization = skipInitialization;
+    public void setVerify(boolean verify) {
+        this.verify = verify;
+    }
+
+    public void setOnlyVerify(boolean onlyVerify) {
+        this.onlyVerify = onlyVerify;
     }
 
     /**
-     * Same as {@link #copy(RepositoryInitializer)}, but with no custom initializer. 
+     * Same as {@link #copy(RepositoryInitializer)}, but with no custom initializer.
+     *
+     * @throws RepositoryException if the copy operation fails
      */
     public void copy() throws RepositoryException {
         copy(null);
@@ -241,31 +252,35 @@ public class RepositorySidegrade {
      * during the copy operation as this method requires exclusive access
      * to the repositories.
      * 
-     * @param initializer optional extra repository initializer to use
+     * @param initializer optional repository initializer to use
      *
      * @throws RepositoryException if the copy operation fails
      */
     public void copy(RepositoryInitializer initializer) throws RepositoryException {
         try {
-            NodeBuilder targetRoot = target.getRoot().builder();
+            if (!onlyVerify) {
+                NodeBuilder targetRoot = target.getRoot().builder();
+                if (VersionHistoryUtil.getVersionStorage(targetRoot).exists() && !versionCopyConfiguration.skipOrphanedVersionsCopy()) {
+                    LOG.warn("The version storage on destination already exists. Orphaned version histories will be skipped.");
+                    versionCopyConfiguration.setCopyOrphanedVersions(null);
+                }
 
-            if (skipInitialization) {
-                LOG.info("Skipping the repository initialization");
-            } else {
-                new InitialContent().initialize(targetRoot);
                 if (initializer != null) {
                     initializer.initialize(targetRoot);
                 }
-            }
 
-            final NodeState reportingSourceRoot = ReportingNodeState.wrap(source.getRoot(), new LoggingReporter(LOG, "Copying", 10000, -1));
-            final NodeState sourceRoot;
-            if (filterLongNames) {
-                sourceRoot = NameFilteringNodeState.wrap(reportingSourceRoot);
-            } else {
-                sourceRoot = reportingSourceRoot;
+                final NodeState reportingSourceRoot = ReportingNodeState.wrap(source.getRoot(), new LoggingReporter(LOG, "Copying", LOG_NODE_COPY, -1));
+                final NodeState sourceRoot;
+                if (filterLongNames) {
+                    sourceRoot = NameFilteringNodeState.wrap(reportingSourceRoot);
+                } else {
+                    sourceRoot = reportingSourceRoot;
+                }
+                copyState(sourceRoot, targetRoot);
             }
-            copyState(sourceRoot, targetRoot);
+            if (verify || onlyVerify) {
+                verify();
+            }
 
         } catch (Exception e) {
             throw new RepositoryException("Failed to copy content", e);
@@ -278,7 +293,7 @@ public class RepositorySidegrade {
         builder.setChildNode(":async");
     }
 
-    private void copyState(NodeState sourceRoot, NodeBuilder targetRoot) throws CommitFailedException {
+    private void copyState(NodeState sourceRoot, NodeBuilder targetRoot) throws CommitFailedException, RepositoryException {
         copyWorkspace(sourceRoot, targetRoot);
 
         if (includeIndex) {
@@ -286,43 +301,61 @@ public class RepositorySidegrade {
         }
 
         boolean isRemoveCheckpointReferences = false;
-        if (!copyCheckpoints(targetRoot)) {
-            LOG.info("Copying checkpoints is not supported for this combination of node stores");
+        if (!isCompleteMigration()) {
+            LOG.info("Custom paths have been specified, checkpoints won't be migrated");
             isRemoveCheckpointReferences = true;
-        }
-        if (!DEFAULT_INCLUDE_PATHS.equals(includePaths)) {
-            isRemoveCheckpointReferences = true;
+        } else {
+            boolean checkpointsCopied = copyCheckpoints(targetRoot);
+            if (!checkpointsCopied) {
+                LOG.info("Copying checkpoints is not supported for this combination of node stores");
+                isRemoveCheckpointReferences = true;
+            }
         }
         if (isRemoveCheckpointReferences) {
             removeCheckpointReferences(targetRoot);
         }
 
-        if (!versionCopyConfiguration.skipOrphanedVersionsCopy()) {
-            copyVersionStorage(sourceRoot, targetRoot, versionCopyConfiguration);
-        }
-
         final List<CommitHook> hooks = new ArrayList<CommitHook>();
-        hooks.add(new EditorHook(
-                new VersionableEditor.Provider(sourceRoot, Oak.DEFAULT_WORKSPACE_NAME, versionCopyConfiguration)));
+        if (!versionCopyConfiguration.isCopyAll()) {
+            NodeBuilder versionStorage = VersionHistoryUtil.getVersionStorage(targetRoot);
+            if (!versionStorage.exists()) { // it's possible that this is a new repository and the version storage
+                                            // hasn't been created/copied yet
+                versionStorage = VersionHistoryUtil.createVersionStorage(targetRoot);
+            }
+            if (!versionCopyConfiguration.skipOrphanedVersionsCopy()) {
+                copyVersionStorage(targetRoot, getVersionStorage(sourceRoot), versionStorage, versionCopyConfiguration);
+            }
+            hooks.add(new EditorHook(new VersionableEditor.Provider(sourceRoot, getWorkspaceName(), versionCopyConfiguration)));
+        }
 
         if (customCommitHooks != null) {
             hooks.addAll(customCommitHooks);
         }
 
-        markIndexesToBeRebuilt(targetRoot);
-
-        // type validation, reference and indexing hooks
-        hooks.add(new EditorHook(new CompositeEditorProvider(
-                createTypeEditorProvider(),
-                createIndexEditorProvider()
-        )));
+        if (!isCompleteMigration()) {
+            markIndexesToBeRebuilt(targetRoot);
+            // type validation, reference and indexing hooks
+            hooks.add(new EditorHook(new CompositeEditorProvider(
+                    createTypeEditorProvider(),
+                    createIndexEditorProvider()
+            )));
+        }
 
         target.merge(targetRoot, new LoggingCompositeHook(hooks, null, false), CommitInfo.EMPTY);
     }
 
+    private boolean isCompleteMigration() {
+        return includePaths.equals(DEFAULT_INCLUDE_PATHS) && excludePaths.equals(DEFAULT_EXCLUDE_PATHS) && mergePaths.equals(DEFAULT_MERGE_PATHS);
+    }
+
     private void copyWorkspace(NodeState sourceRoot, NodeBuilder targetRoot) {
         final Set<String> includes = calculateEffectiveIncludePaths(includePaths, sourceRoot);
-        final Set<String> excludes = union(copyOf(this.excludePaths), of("/jcr:system/jcr:versionStorage"));
+        final Set<String> excludes;
+        if (versionCopyConfiguration.isCopyAll()) {
+            excludes = copyOf(this.excludePaths);
+        } else {
+            excludes = union(copyOf(this.excludePaths), of("/jcr:system/jcr:versionStorage"));
+        }
         final Set<String> merges = union(copyOf(this.mergePaths), of("/jcr:system"));
 
         NodeStateCopier.builder()
@@ -344,35 +377,35 @@ public class RepositorySidegrade {
         TarNodeStore sourceTarNS = (TarNodeStore) source;
         TarNodeStore targetTarNS = (TarNodeStore) target;
 
-        NodeState srcSuperRoot = sourceTarNS.getSuperRoot();
-        NodeBuilder builder = targetTarNS.getSuperRoot().builder();
+        NodeState sourceSuperRoot = sourceTarNS.getSuperRoot();
+        NodeBuilder targetSuperRoot = targetTarNS.getSuperRoot().builder();
 
-        String previousRoot = null;
-        for (String checkpoint : getCheckpointPaths(srcSuperRoot)) {
-            // copy the checkpoint without the root
-            NodeStateCopier.builder()
-                    .include(checkpoint)
-                    .exclude(checkpoint + "/root")
-                    .copy(srcSuperRoot, builder);
-
-            // reference the previousRoot or targetRoot as a new checkpoint root
-            NodeState baseRoot;
-            if (previousRoot == null) {
-                baseRoot = targetRoot.getNodeState();
+        String previousCheckpoint = null;
+        for (String checkpoint : getCheckpointNames(sourceSuperRoot)) {
+            NodeState targetPreviousRoot, sourcePreviousRoot;
+            if (previousCheckpoint == null) {
+                sourcePreviousRoot = source.getRoot();
+                targetPreviousRoot = targetRoot.getNodeState();
             } else {
-                baseRoot = getBuilder(builder, previousRoot).getNodeState();
+                sourcePreviousRoot = getCheckpointRoot(sourceSuperRoot, previousCheckpoint);
+                targetPreviousRoot = getCheckpointRoot(targetSuperRoot.getNodeState(), previousCheckpoint);
             }
-            NodeBuilder targetParent = getBuilder(builder, checkpoint);
-            targetParent.setChildNode("root", baseRoot);
-            previousRoot = checkpoint + "/root";
+            NodeState sourceCheckpoint = getCheckpoint(sourceSuperRoot, checkpoint);
+            NodeBuilder targetCheckpoint = getCheckpoint(targetSuperRoot, checkpoint);
 
-            // apply diff changes
-            NodeStateCopier.builder()
-                    .include(checkpoint + "/root")
-                    .copy(srcSuperRoot, builder);
+            // copy checkpoint metadata
+            NodeStateCopier.copyProperties(sourceCheckpoint, targetCheckpoint);
+            targetCheckpoint.setChildNode("properties", sourceCheckpoint.getChildNode("properties"));
+
+            // create the checkpoint root
+            NodeState sourceCheckpointRoot = sourceCheckpoint.getChildNode("root");
+            NodeBuilder targetCheckpointRoot = targetCheckpoint.setChildNode("root", targetPreviousRoot);
+            sourceCheckpointRoot.compareAgainstBaseState(sourcePreviousRoot, new ApplyDiff(targetCheckpointRoot));
+
+            previousCheckpoint = checkpoint;
         }
 
-        targetTarNS.setSuperRoot(builder);
+        targetTarNS.setSuperRoot(targetSuperRoot);
         return true;
    }
 
@@ -382,7 +415,7 @@ public class RepositorySidegrade {
      * @param superRoot
      * @return
      */
-    private static List<String> getCheckpointPaths(NodeState superRoot) {
+    private static List<String> getCheckpointNames(NodeState superRoot) {
         List<ChildNodeEntry> checkpoints = newArrayList(superRoot.getChildNode("checkpoints").getChildNodeEntries().iterator());
         sort(checkpoints, new Comparator<ChildNodeEntry>() {
             @Override
@@ -396,16 +429,77 @@ public class RepositorySidegrade {
             @Nullable
             @Override
             public String apply(@Nullable ChildNodeEntry input) {
-                return "/checkpoints/" + input.getName();
+                return input.getName();
             }
         });
     }
 
-    private static NodeBuilder getBuilder(NodeBuilder root, String path) {
-        NodeBuilder builder = root;
-        for (String element : PathUtils.elements(path)) {
-            builder = builder.child(element);
+    private static NodeState getCheckpointRoot(NodeState superRoot, String name) {
+        return getCheckpoint(superRoot, name).getChildNode("root");
+    }
+
+    private static NodeState getCheckpoint(NodeState superRoot, String name) {
+        return superRoot.getChildNode("checkpoints").getChildNode(name);
+    }
+
+    private static NodeBuilder getCheckpoint(NodeBuilder superRoot, String name) {
+        return superRoot.child("checkpoints").child(name);
+    }
+
+    private String getWorkspaceName() throws RepositoryException {
+        String definedName = System.getProperty(WORKSPACE_NAME_PROP);
+        String detectedName = deriveWorkspaceName();
+        if (StringUtils.isNotBlank(definedName)) {
+            return definedName;
+        } else if (StringUtils.isNotBlank(detectedName)) {
+            return detectedName;
+        } else {
+            throw new RepositoryException("Can't detect the workspace name. Please use the system property " + WORKSPACE_NAME_PROP + " to set it manually.");
         }
-        return builder;
+    }
+
+    /**
+     * This method tries to derive the workspace name from the source repository. It uses the
+     * fact that the /jcr:system/rep:permissionStore usually contains just one child
+     * named after the workspace.
+     *
+     * @return the workspace name or null if it can't be derived
+     */
+    private String deriveWorkspaceName() {
+        NodeState permissionStore = source.getRoot().getChildNode(JCR_SYSTEM).getChildNode(REP_PERMISSION_STORE);
+        List<String> nameCandidates = new ArrayList<String>();
+        for (ChildNodeEntry e : permissionStore.getChildNodeEntries()) {
+            String primaryType = e.getNodeState().getName(JCR_PRIMARYTYPE);
+            if (NT_REP_PERMISSION_STORE.equals(primaryType)) {
+                nameCandidates.add(e.getName());
+            }
+        }
+        if (nameCandidates.size() == 1) {
+            return nameCandidates.get(0);
+        } else {
+            return null;
+        }
+    }
+
+    private void verify() {
+        final NodeState sourceRoot;
+        final NodeState targetRoot;
+
+        if (source instanceof TarNodeStore && target instanceof TarNodeStore) {
+            sourceRoot = ((TarNodeStore) source).getSuperRoot();
+            targetRoot = ((TarNodeStore) target).getSuperRoot();
+        } else {
+            sourceRoot = source.getRoot();
+            targetRoot = target.getRoot();
+        }
+
+        final NodeState reportingSource = ReportingNodeState.wrap(sourceRoot, new LoggingReporter(LOG, "Verifying", LOG_NODE_COPY, -1));
+
+        LOG.info("Verifying whether repositories are identical");
+        if (targetRoot.compareAgainstBaseState(reportingSource, new LoggingEqualsDiff(LOG, "/"))) {
+            LOG.info("Verification result: both repositories are identical");
+        } else {
+            LOG.warn("Verification result: repositories are not identical");
+        }
     }
 }

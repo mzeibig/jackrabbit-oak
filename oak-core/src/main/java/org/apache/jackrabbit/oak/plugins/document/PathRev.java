@@ -22,6 +22,8 @@ import javax.annotation.Nonnull;
 
 import org.apache.jackrabbit.oak.cache.CacheValue;
 import org.apache.jackrabbit.oak.commons.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
@@ -30,6 +32,8 @@ import static com.google.common.base.Preconditions.checkNotNull;
  * revision.
  */
 public final class PathRev implements CacheValue {
+
+    private static final Logger LOG = LoggerFactory.getLogger(PathRev.class);
 
     private final String path;
 
@@ -40,11 +44,20 @@ public final class PathRev implements CacheValue {
         this.revision = checkNotNull(revision);
     }
 
+    public String getPath() {
+        return path;
+    }
+
     @Override
     public int getMemory() {
-        return 24                                       // shallow size
-                + StringUtils.estimateMemoryUsage(path) // path
-                + revision.getMemory();                 // revision
+        long size =  24                                               // shallow size
+                       + (long)StringUtils.estimateMemoryUsage(path)  // path
+                       + revision.getMemory();                        // revision
+        if (size > Integer.MAX_VALUE) {
+            LOG.debug("Estimated memory footprint larger than Integer.MAX_VALUE: {}.", size);
+            size = Integer.MAX_VALUE;
+        }
+        return (int) size;
     }
 
     //----------------------------< Object >------------------------------------
@@ -68,7 +81,12 @@ public final class PathRev implements CacheValue {
 
     @Override
     public String toString() {
-        return path + "@" + revision;
+        int dim = revision.getDimensions();
+        StringBuilder sb = new StringBuilder(path.length() + (Revision.REV_STRING_APPROX_SIZE + 1) * dim);
+        sb.append(path);
+        sb.append("@");
+        revision.toStringBuilder(sb);
+        return sb.toString();
     }
 
     public String asString() {

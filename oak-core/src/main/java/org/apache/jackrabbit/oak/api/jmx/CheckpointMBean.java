@@ -21,11 +21,14 @@ package org.apache.jackrabbit.oak.api.jmx;
 
 import javax.management.openmbean.TabularData;
 
+import aQute.bnd.annotation.ProviderType;
+
 /**
  * MBean for managing {@link org.apache.jackrabbit.oak.spi.state.NodeStore#checkpoint checkpoints}.
  */
+@ProviderType
 public interface CheckpointMBean {
-    String TYPE = "CheckpointManger";
+    String TYPE = "CheckpointManager";
 
     /**
      * List the checkpoints that are currently present along with

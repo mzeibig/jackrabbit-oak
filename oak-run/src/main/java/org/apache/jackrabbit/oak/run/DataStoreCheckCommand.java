@@ -43,6 +43,8 @@ import joptsimple.OptionParser;
 import joptsimple.OptionSet;
 import joptsimple.OptionSpec;
 import joptsimple.OptionSpecBuilder;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.FilenameUtils;
 import org.apache.jackrabbit.oak.commons.FileIOUtils.FileLineDifferenceIterator;
 import org.apache.jackrabbit.oak.plugins.blob.BlobReferenceRetriever;
 import org.apache.jackrabbit.oak.plugins.blob.ReferenceCollector;
@@ -64,7 +66,8 @@ import static org.apache.jackrabbit.oak.commons.FileIOUtils.writeStrings;
 import static org.apache.jackrabbit.oak.plugins.segment.FileStoreHelper.openFileStore;
 
 /**
- * Command to check data store consistency and also optionally retrieve ids & references
+ * Command to check data store consistency and also optionally retrieve ids
+ * and references.
  */
 public class DataStoreCheckCommand implements Command {
     private static final String DELIM = ",";
@@ -91,8 +94,11 @@ public class DataStoreCheckCommand implements Command {
             // Optional argument to specify the dump path
             ArgumentAcceptingOptionSpec<String> dump = parser.accepts("dump", "Dump Path")
                 .withRequiredArg().ofType(String.class);
-            OptionSpec
-                segmentTar = parser.accepts("segment-tar", "Use oak-segment-tar instead of oak-segment");
+            OptionSpec segment = parser.accepts("segment", "Use oak-segment instead of oak-segment-tar");
+
+            // Optional argument to specify tracking
+            ArgumentAcceptingOptionSpec<String> track = parser.accepts("track", "Local repository home folder")
+                .withRequiredArg().ofType(String.class);
 
             OptionSpec<?> help = parser.acceptsAll(asList("h", "?", "help"),
                 "show help").forHelp();
@@ -133,12 +139,12 @@ public class DataStoreCheckCommand implements Command {
                     closer.register(Utils.asCloseable(nodeStore));
                     blobStore = (GarbageCollectableBlobStore) nodeStore.getBlobStore();
                     marker = new DocumentBlobReferenceRetriever(nodeStore);
-                } else if (options.has(segmentTar)) {
-                    marker = SegmentTarUtils.newBlobReferenceRetriever(source, closer);
-                } else {
+                } else if (options.has(segment)) {
                     FileStore fileStore = openFileStore(source);
                     closer.register(Utils.asCloseable(fileStore));
                     marker = new SegmentBlobReferenceRetriever(fileStore.getTracker());
+                } else {
+                    marker = SegmentTarUtils.newBlobReferenceRetriever(source, closer);
                 }
             }
 
@@ -159,8 +165,17 @@ public class DataStoreCheckCommand implements Command {
             closer.register(register);
 
             if (options.has(idOp) || options.has(consistencyOp)) {
-                retrieveBlobIds(blobStore,
-                    register.createFile(idOp, dumpPath));
+                File dumpFile = register.createFile(idOp, dumpPath);
+                retrieveBlobIds(blobStore, dumpFile);
+
+                // If track path specified copy the file to the location
+                if (options.has(track)) {
+                    String trackPath = options.valueOf(track);
+                    File trackingFileParent = new File(FilenameUtils.concat(trackPath, "blobids"));
+                    File trackingFile = new File(trackingFileParent,
+                        "blob-" + String.valueOf(System.currentTimeMillis()) + ".gen");
+                    FileUtils.copyFile(dumpFile, trackingFile);
+                }
             }
 
             if (options.has(refOp) || options.has(consistencyOp)) {

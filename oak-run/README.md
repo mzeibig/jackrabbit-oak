@@ -17,8 +17,6 @@ The following runmodes are currently available:
     * graph           : Export the segment graph of a segment store to a file.
     * history         : Trace the history of a node
     * check           : Check the FileStore for inconsistencies
-    * primary         : Run a TarMK Cold Standby primary instance
-    * standby         : Run a TarMK Cold Standby standby instance
     * scalability     : Run scalability tests against different Oak repository fixtures.
     * recovery        : Run a _lastRev recovery on a MongoMK repository
     * checkpoints     : Manage checkpoints
@@ -27,7 +25,8 @@ The following runmodes are currently available:
     * tarmkdiff       : Show changes between revisions on TarMk
     * tarmkrecovery   : Lists candidates for head journal entries
     * datastorecheck  : Consistency checker for data store 
-    * resetclusterid  : Resets the cluster id   
+    * resetclusterid  : Resets the cluster id
+    * datastorecacheupgrade : Upgrades the JR2 DataStore cache
     * help            : Print a list of available runmodes
     
 
@@ -39,33 +38,17 @@ See the subsections below for more details on how to use these modes.
 Backup
 ------
 
-The 'backup' mode creates a backup from an existing oak repository. The most efficient 
-way to backup the TarMK repository is to use a file system copy of the repository folder.
-The current backup implementation acts like a compaction to an enternal folder, on top of 
-copying the state, it will also try to compress it, so it will significantly slower than 
-what one might expect from a simple copy backup. Incremental backups (backup over an existing
-backup will still need to perform a full content diff) and will attempt to compact the diff.
-All optimisation flags used for offline compaction very much apply for this case as well.
-The FileStore backup doesn't need access to the DataStore, but if one is usually configured with
-the repository, it will need the following system property set to true in order to be able to
-perform the diffing `-Doak.backup.UseFakeBlobStore=true`. To start this mode, use:
-
-    $ java -jar oak-run-*.jar backup /path/to/oak/repository /path/to/backup
+See the [official documentation](http://jackrabbit.apache.org/oak/docs/nodestore/segment/overview.html#backup).
 
 Restore
 -------
 
-The 'restore' mode imports a backup of an existing oak repository. To start this mode, use:
-
-    $ java -jar oak-run-*.jar restore /path/to/oak/repository /path/to/backup
+See the [official documentation](http://jackrabbit.apache.org/oak/docs/nodestore/segment/overview.html#restore).
 
 Debug
 -----
 
-The 'debug' mode allows to obtain information about the status of the specified
-store. Currently this is only supported for the TarMK. To start this mode, use:
-
-    $ java -jar oak-run-*.jar debug /path/to/oak/repository [id...]
+See the [official documentation](http://jackrabbit.apache.org/oak/docs/nodestore/segment/overview.html#debug).
 
 Console
 -------
@@ -148,101 +131,17 @@ a negative offset translating all timestamps into a valid int range.
 History
 -------
 
-Trace the history of a node backward through the revision history.
-
-    $ java -jar oak-run-*.jar history [File] <options>
-
-    [File] -- Path to segment store (required)
-
-    Option             Description
-    ------             -----------
-    --depth <Integer>  Depth up to which to dump node states
-                         (default: 0)
-    --journal          journal file (default: journal.log)
-    --path             Path for which to trace the history
-                         (default: /)
+See the [official documentation](http://jackrabbit.apache.org/oak/docs/nodestore/segment/overview.html#history).
 
 Check
 -----
 
-The 'check' mode checks the storage of the FileStore for inconsistencies.
-
-    $ java -jar oak-run-*.jar check <options>
-
-    --bin [Long]   read the n first bytes from binary  
-                     properties. -1 for all bytes.     
-                     (default: 0)                      
-    --deep [Long]  enable deep consistency checking. An
-                     optional long specifies the number
-                     of seconds between progress
-                     notifications (default:
-                     9223372036854775807)
-    --journal      journal file (default: journal.log)
-    --path         path to the segment store (required)
-
-For example
-
-    $ java -jar oak-run-*.jar check -p repository/segmentstore -d
-
-Checks the files in the `repository/segmentstore` directory for inconsistencies.
-It will start with the latest revision in the `journal.log` file going back revision
-by revision until a full traversal succeeds. During the traversal the current path
-will is output to the console every 1 second. When done the latest good revision is
-output.
-
-    Searching for last good revision in journal.log
-    Checking revision b82167c3-1ceb-4404-a67f-9c542e854086:240872
-    Traversing /
-    Error while traversing /home/users/foo: Segment 476e1abd-0ea0-44a8-ac3c-3a3bd
-    Traversed 50048 nodes and 303846 properties
-    Broken revision b82167c3-1ceb-4404-a67f-9c542e854086:240872
-    Checking revision 84d693cb-f214-4d19-a1cd-8b5766d50fdb:250028
-    Checking /home/users/foo
-    Traversed 11612889 nodes and 27511640 properties
-    Found latest good revision 84d693cb-f214-4d19-a1cd-8b5766d50fdb:250028
-    Searched through 2 of 390523 revisions
-
-Primary
--------
-
-The 'primary' mode starts a TarMK Cold Standby primary instance (master) listening on a TCP/IP port for connecting slaves.
-
-    $ java -jar oak-run-*.jar primary [options] /path/to/TarMK
-
-The following options are available:
-
-    --port 8023            - port to listen at
-    --admissible 127.0.0.1 - admissible client IP range or host name
-    --secure               - use secure connections
-
-Standby
--------
-
-The 'standby' mode starts a TarMK Cold Standby standby instance (slave) to create or update a continuous backup from a Cold Standby primary.
-
-    $ java -jar oak-run-*.jar standby [options] /path/to/TarMK
-
-The following options are available:
-
-    --port 8023            - port to connect to
-    --host 127.0.0.1       - host to connect to
-    --secure               - use secure connections
-    --interval 5           - schedule the slave to run continuously, connecting every n seconds
+See the [official documentation](http://jackrabbit.apache.org/oak/docs/nodestore/segment/overview.html#check).
 
 Compact
 -------
 
-The 'compact' mode runs the segment compaction operation on the provided TarMK
-repository. To start this mode, use:
-
-    $ java -jar oak-run-*.jar compact [path] <options>
-
-    [File] -- Path to segment store (required)
-
-    Option   Description
-    ------   -----------
-    --force  Force compaction and ignore non
-               matching segment version
+See the [official documentation](http://jackrabbit.apache.org/oak/docs/nodestore/segment/overview.html#compact).
 
 Checkpoints
 -----------
@@ -428,10 +327,10 @@ to be used. The following fixtures are currently supported:
 | Oak-Memory    | Oak with default in-memory storage                    |
 | Oak-MemoryNS  | Oak with default in-memory NodeStore                  |
 | Oak-Mongo     | Oak with the default Mongo backend                    |
-| Oak-Mongo-FDS | Oak with the default Mongo backend and FileDataStore  |
+| Oak-Mongo-DS  | Oak with the default Mongo backend and DataStore      |
 | Oak-MongoNS   | Oak with the Mongo NodeStore                          |
 | Oak-Tar       | Oak with the Tar backend (aka Segment NodeStore)      |
-| Oak-Tar-FDS   | Oak with the Tar backend and FileDataStore            |
+| Oak-Tar-DS    | Oak with the Tar backend and DataStore                |
 
 Jackrabbit fixture requires [Oak Runnable JR2 jar](#jr2)
 
@@ -482,6 +381,7 @@ The following benchmark options (with default values) are currently supported:
     --report false         - Whether to output intermediate results
     --csvFile <file>       - Optional csv file to report the benchmark results
     --concurrency <levels> - Comma separated list of concurrency levels
+    --metrics false        - Enable metrics based stats collection
     --rdbjdbcuri           - JDBC URL for RDB persistence (defaults to local file-based H2)
     --rdbjdbcuser          - JDBC username (defaults to "")
     --rdbjdbcpasswd        - JDBC password (defaults to "")
@@ -530,16 +430,20 @@ that we used to produce earlier.
 
 Finally the benchmark runner supports the following repository fixtures:
 
-| Fixture       | Description                                           |
-|---------------|-------------------------------------------------------|
-| Jackrabbit    | Jackrabbit with the default embedded Derby  bundle PM |
-| Oak-Memory    | Oak with default in-memory storage                    |
-| Oak-MemoryNS  | Oak with default in-memory NodeStore                  |
-| Oak-Mongo     | Oak with the default Mongo backend                    |
-| Oak-Mongo-FDS | Oak with the default Mongo backend and FileDataStore  |
-| Oak-MongoNS   | Oak with the Mongo NodeStore                          |
-| Oak-Tar       | Oak with the Tar backend (aka Segment NodeStore)      |
-| Oak-RDB       | Oak with the DocumentMK/RDB persistence               |
+| Fixture             | Description                                                    |
+|---------------------|----------------------------------------------------------------|
+| Jackrabbit          | Jackrabbit with the default embedded Derby  bundle PM          |
+| Oak-Memory          | Oak with default in-memory storage                             |
+| Oak-MemoryNS        | Oak with default in-memory NodeStore                           |
+| Oak-Mongo           | Oak with the default Mongo backend                             |
+| Oak-Mongo-DS        | Oak with the default Mongo backend and DataStore               |
+| Oak-MongoNS         | Oak with the Mongo NodeStore                                   |
+| Oak-Segment-Tar     | Oak with the Segment Tar backend                               |
+| Oak-Segment-Tar-DS  | Oak with the Segment Tar backend and DataStore                 |
+| Oak-Tar             | Oak with the Tar backend (deprecated)                          |
+| Oak-Tar-DS          | Oak with the Tar backend (deprecated) and DataStore            |
+| Oak-RDB             | Oak with the DocumentMK/RDB persistence                        |
+| Oak-RDB-DS          | Oak with the DocumentMK/RDB persistence and DataStore          |
 
 (Note that for Oak-RDB, the required JDBC drivers either need to be embedded
 into oak-run, or be specified separately in the class path. Furthermode, 
@@ -705,15 +609,17 @@ suites in the scalability command line, and oak-run will execute each suite in s
 
 Finally the scalability runner supports the following repository fixtures:
 
-| Fixture       | Description                                           |
-|---------------|-------------------------------------------------------|
-| Oak-Memory    | Oak with default in-memory storage                    |
-| Oak-MemoryNS  | Oak with default in-memory NodeStore                  |
-| Oak-Mongo     | Oak with the default Mongo backend                    |
-| Oak-Mongo-FDS | Oak with the default Mongo backend and FileDataStore  |
-| Oak-MongoNS   | Oak with the Mongo NodeStore                          |
-| Oak-Tar       | Oak with the Tar backend (aka Segment NodeStore)      |
-| Oak-RDB       | Oak with the DocumentMK/RDB persistence               |
+| Fixture       | Description                                                    |
+|---------------|----------------------------------------------------------------|
+| Oak-Memory    | Oak with default in-memory storage                             |
+| Oak-MemoryNS  | Oak with default in-memory NodeStore                           |
+| Oak-Mongo     | Oak with the default Mongo backend                             |
+| Oak-Mongo-DS  | Oak with the default Mongo backend and DataStore               |
+| Oak-MongoNS   | Oak with the Mongo NodeStore                                   |
+| Oak-Tar       | Oak with the Tar backend (aka Segment NodeStore)               |
+| Oak-Tar-DS    | Oak with the Tar backend (aka Segment NodeStore) and DataStore |
+| Oak-RDB       | Oak with the DocumentMK/RDB persistence                        |
+| Oak-RDB-DS    | Oak with the DocumentMK/RDB persistence and DataStore          |
 
 (Note that for Oak-RDB, the required JDBC drivers either need to be embedded
 into oak-run, or be specified separately in the class path.)
@@ -908,60 +814,10 @@ can be dumped to a file
 
 [1]: http://jackrabbit.apache.org/oak/docs/oak-mongo-js/oak.html
 
-<a name="tarmkdiff"></a>
 Oak TarMK Revision Diff
------------------------
+=======================
 
-Show changes between revisions on TarMk. It uses a read-only store, so it can also be used on a running system without the need to shut down.
-
-    $ java -jar oak-run-*.jar tarmkdiff path/to/repository [--list] [--diff=R0..R1] [--incremental] [--ignore-snfes] [--output=/path/to/output/file]
-
-The following options are available:
-
-    --list           - Lists the existing revisions. will ignore other params if this is provided
-    --diff           - Revision diff interval. Ex '--diff=R0..R1'. 'HEAD' can be used to reference the latest head revision, ie. '--diff=R0..HEAD'
-    --incremental    - Runs diffs between each subsequent revisions in the provided interval (false by default)
-    --ignore-snfes   - Ignores SegmentNotFoundExceptions and continues running the diff (experimental) (false by default)
-    --path           - Filter diff by given path
-    --output         - Output file name (generated randomly if not provided)
-
-Output sample
-
-    rev 7583946d-1817-4716-a05c-660ee52ddce0.ff94..c238cd7d-87a0-4cca-aa14-80b75e8ab81d.fb3e
-    ^ /oak:index
-    ^ /oak:index/lucene
-    ^ /oak:index/lucene/:data
-    - /oak:index/lucene/:data/_3729.cfs
-    + /oak:index/lucene/:data/_372d.si
-        + blobSize<LONG> = 1047552
-        + jcr:lastModified<LONG> = 1447948037017
-        + jcr:data<BINARIES>[1] = [252 bytes]
-    - /oak:index/lucene/:data/segments_37bv
-    + /oak:index/lucene/:data/_372d.cfe
-        + blobSize<LONG> = 1047552
-        + jcr:lastModified<LONG> = 1447948037017
-        + jcr:data<BINARIES>[1] = [224 bytes]
-    - /oak:index/lucene/:data/_3729.si
-    - /oak:index/lucene/:data/_3729.cfe
-    + /oak:index/lucene/:data/_372d.cfs
-        + blobSize<LONG> = 1047552
-        + jcr:lastModified<LONG> = 1447948037017
-        + jcr:data<BINARIES>[1] = [907 bytes]
-    + /oak:index/lucene/:data/segments_37bz
-        + blobSize<LONG> = 1047552
-        + jcr:lastModified<LONG> = 1447948045167
-        + jcr:data<BINARIES>[1] = [863 bytes]
-    ^ /oak:index/lucene/:data/segments.gen
-        ^ jcr:lastModified
-          - jcr:lastModified<LONG> = 1447947918027
-          + jcr:lastModified<LONG> = 1447948045167
-        ^ jcr:data
-          - jcr:data<BINARIES>[1] = [20 bytes]
-          + jcr:data<BINARIES>[1] = [20 bytes]
-    ^ /oak:index/lucene/:status
-        ^ lastUpdated
-          - lastUpdated<DATE> = 2015-11-19T10:45:18.027-05:00
-          + lastUpdated<DATE> = 2015-11-19T10:47:25.167-05:00
+See the [official documentation](http://jackrabbit.apache.org/oak/docs/nodestore/segment/overview.html#diff).
 
 <a name="tarmkrecovery"></a>
 Oak TarMK Revision Recovery
@@ -985,25 +841,27 @@ Use the following command:
     $ java -jar oak-run-*.jar datastorecheck [--id] [--ref] [--consistency] \
             [--store <path>|<mongo_uri>] \
             [--s3ds <s3ds_config>|--fds <fds_config>] \
-            [--dump <path>]
+            [--dump <path>] \
+            [--track <DataStore local tracking path>]
 
 The following options are available:
 
     --id             - List all the ids in the data store
     --ref            - List all the blob references in the node store
-    --consistency    - Lists all the missing blobs by doind a consistency check
+    --consistency    - List all the missing blobs by doing a consistency check
     Atleast one of the above should be specified
     
     --store          - Path to the segment store of mongo uri (Required for --ref & --consistency option above)
     --dump           - Path where to dump the files (Optional). Otherwise, files will be dumped in the user tmp directory.
     --s3ds           - Path to the S3DataStore configuration file
     --fds            - Path to the FileDataStore configuration file ('path' property is mandatory)
+    --track          - Path of the local reposity home folder (Optional). This will place a copy of the downloaded blob ids to be tracked.
 
 Note:
 For using S3DataStore the following additional jars have to be downloaded
     - [commons-logging-1.1.3.jar](http://central.maven.org/maven2/commons-logging/commons-logging/1.1.3/commons-logging-1.1.3.jar)
     - [httpcore-4.4.4.jar](http://central.maven.org/maven2/org/apache/httpcomponents/httpcore/4.4.4/httpcore-4.4.4.jar)
-    - [aws-java-sdk-1.10.76.jar](http://central.maven.org/maven2/com/amazonaws/aws-java-sdk/1.10.76/aws-java-sdk-1.10.76.jar)
+    - [aws-java-sdk-osgi-1.10.76.jar](http://central.maven.org/maven2/com/amazonaws/aws-java-sdk-osgi/1.10.76/aws-java-sdk-osgi-1.10.76.jar)
     
 The command to be executed for S3DataStore
 
@@ -1039,6 +897,17 @@ Resets the cluster id generated internally. Use the following command after stop
             { /path/to/oak/repository | mongodb://host:port/database }
 
 The cluster id will be removed and will be generated on next server start up.
+
+Oak DataStore Cache Upgrade
+---------------------------
+
+Upgrades the JR2 DataStore cache by moving files to the Upload staging and the download cache of the DataStore.
+
+    $ java -classpath oak-run-*.jar datastorecacheupgrade \
+        --homeDir <home_directory> \
+        --path <path> \
+        --moveCache <true|false> \
+        --deleteMapFile <true|false>
 
 License
 -------

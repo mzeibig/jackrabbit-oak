@@ -142,16 +142,16 @@ public class SegmentNodeStoreServiceTest {
 
     private SegmentNodeStoreService segmentNodeStoreService;
 
-    private void registerSegmentNodeStoreService(boolean customBlobStore) {
+    protected void registerSegmentNodeStoreService(boolean customBlobStore) {
         Map<String, Object> properties = newHashMap();
 
         properties.put(SegmentNodeStoreService.CUSTOM_BLOB_STORE, customBlobStore);
-        properties.put(SegmentNodeStoreService.DIRECTORY, folder.getRoot().getAbsolutePath());
+        properties.put(SegmentNodeStoreService.REPOSITORY_HOME_DIRECTORY, folder.getRoot().getAbsolutePath());
 
         segmentNodeStoreService = context.registerInjectActivateService(new SegmentNodeStoreService(), properties);
     }
 
-    private void unregisterSegmentNodeStoreService() {
+    protected void unregisterSegmentNodeStoreService() {
         deactivate(segmentNodeStoreService);
     }
 
@@ -165,12 +165,12 @@ public class SegmentNodeStoreServiceTest {
         blobStore.unregister();
     }
 
-    private void assertServiceActivated() {
+    protected void assertServiceActivated() {
         assertNotNull(context.getService(NodeStore.class));
         assertNotNull(context.getService(SegmentStoreProvider.class));
     }
 
-    private void assertServiceNotActivated() {
+    protected void assertServiceNotActivated() {
         assertNull(context.getService(NodeStore.class));
         assertNull(context.getService(SegmentStoreProvider.class));
     }

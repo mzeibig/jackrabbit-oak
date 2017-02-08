@@ -25,6 +25,7 @@ import static com.google.common.collect.Lists.newArrayListWithCapacity;
 import static com.google.common.collect.Maps.newHashMap;
 import static com.google.common.collect.Sets.newHashSet;
 import static com.google.common.collect.Sets.union;
+import static java.util.Collections.emptyMap;
 import static org.apache.jackrabbit.JcrConstants.JCR_SYSTEM;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.REINDEX_PROPERTY_NAME;
 import static org.apache.jackrabbit.oak.plugins.name.Namespaces.addCustomMapping;
@@ -40,6 +41,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.Calendar;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -123,9 +125,11 @@ import org.apache.jackrabbit.oak.upgrade.nodestate.NameFilteringNodeState;
 import org.apache.jackrabbit.oak.upgrade.nodestate.report.LoggingReporter;
 import org.apache.jackrabbit.oak.upgrade.nodestate.report.ReportingNodeState;
 import org.apache.jackrabbit.oak.upgrade.nodestate.NodeStateCopier;
+import org.apache.jackrabbit.oak.upgrade.security.AuthorizableFolderEditor;
 import org.apache.jackrabbit.oak.upgrade.security.GroupEditorProvider;
 import org.apache.jackrabbit.oak.upgrade.security.RestrictionEditorProvider;
 import org.apache.jackrabbit.oak.upgrade.version.VersionCopyConfiguration;
+import org.apache.jackrabbit.oak.upgrade.version.VersionHistoryUtil;
 import org.apache.jackrabbit.oak.upgrade.version.VersionableEditor;
 import org.apache.jackrabbit.oak.upgrade.version.VersionablePropertiesEditor;
 import org.apache.jackrabbit.spi.Name;
@@ -145,12 +149,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static org.apache.jackrabbit.oak.upgrade.version.VersionCopier.copyVersionStorage;
+import static org.apache.jackrabbit.oak.upgrade.version.VersionHistoryUtil.getVersionStorage;
 
 public class RepositoryUpgrade {
 
     private static final Logger logger = LoggerFactory.getLogger(RepositoryUpgrade.class);
 
-    private static final Set<String> INDEXES_TO_REBUILD = ImmutableSet.of("counter");
+    private static final int LOG_NODE_COPY = Integer.getInteger("oak.upgrade.logNodeCopy", 10000);
+
+    private static final Set<String> INDEXES_TO_REBUILD = ImmutableSet.of("counter", "uuid");
 
     public static final Set<String> DEFAULT_INCLUDE_PATHS = ALL;
 
@@ -401,6 +408,10 @@ public class RepositoryUpgrade {
         logger.info("Copying repository content from {} to Oak", config.getHomeDir());
         try {
             NodeBuilder targetBuilder = target.getRoot().builder();
+            if (VersionHistoryUtil.getVersionStorage(targetBuilder).exists() && !versionCopyConfiguration.skipOrphanedVersionsCopy()) {
+                logger.warn("The version storage on destination already exists. Orphaned version histories will be skipped.");
+                versionCopyConfiguration.setCopyOrphanedVersions(null);
+            }
             final Root upgradeRoot = new UpgradeRoot(targetBuilder);
 
             String workspaceName =
@@ -472,7 +483,7 @@ public class RepositoryUpgrade {
                             source, workspaceName, targetBuilder.getNodeState(), 
                             uriToPrefix, copyBinariesByReference, skipOnError
                     ),
-                    new LoggingReporter(logger, "Migrating", 10000, -1)
+                    new LoggingReporter(logger, "Migrating", LOG_NODE_COPY, -1)
             );
             final NodeState sourceRoot;
             if (filterLongNames) {
@@ -491,7 +502,7 @@ public class RepositoryUpgrade {
             if (!versionCopyConfiguration.skipOrphanedVersionsCopy()) {
                 logger.info("Copying version storage");
                 watch.reset().start();
-                copyVersionStorage(sourceRoot, targetBuilder, versionCopyConfiguration);
+                copyVersionStorage(targetBuilder, getVersionStorage(sourceRoot), getVersionStorage(targetBuilder), versionCopyConfiguration);
                 targetBuilder.getNodeState(); // on TarMK this does call triggers the actual copy
                 logger.info("Version storage copied in {}s ({})", watch.elapsed(TimeUnit.SECONDS), watch);
             } else {
@@ -508,6 +519,9 @@ public class RepositoryUpgrade {
             String groupsPath = userConf.getParameters().getConfigValue(
                     UserConstants.PARAM_GROUP_PATH,
                     UserConstants.DEFAULT_GROUP_PATH);
+            String usersPath = userConf.getParameters().getConfigValue(
+                    UserConstants.PARAM_USER_PATH,
+                    UserConstants.DEFAULT_USER_PATH);
 
             // hooks specific to the upgrade, need to run first
             hooks.add(new EditorHook(new CompositeEditorProvider(
@@ -515,7 +529,8 @@ public class RepositoryUpgrade {
                     new GroupEditorProvider(groupsPath),
                     // copy referenced version histories
                     new VersionableEditor.Provider(sourceRoot, workspaceName, versionCopyConfiguration),
-                    new SameNameSiblingsEditor.Provider()
+                    new SameNameSiblingsEditor.Provider(),
+                    AuthorizableFolderEditor.provider(groupsPath, usersPath)
             )));
 
             // this editor works on the VersionableEditor output, so it can't be
@@ -632,13 +647,18 @@ public class RepositoryUpgrade {
                 config.getLoginModuleConfig(),
                 LoginModuleConfig.PARAM_ADMIN_ID, UserConstants.PARAM_ADMIN_ID,
                 LoginModuleConfig.PARAM_ANONYMOUS_ID, UserConstants.PARAM_ANONYMOUS_ID);
-        ConfigurationParameters userConfig = mapConfigurationParameters(
-                config.getSecurityManagerConfig().getUserManagerConfig(),
-                UserManagerImpl.PARAM_USERS_PATH, UserConstants.PARAM_USER_PATH,
-                UserManagerImpl.PARAM_GROUPS_PATH, UserConstants.PARAM_GROUP_PATH,
-                UserManagerImpl.PARAM_DEFAULT_DEPTH, UserConstants.PARAM_DEFAULT_DEPTH,
-                UserManagerImpl.PARAM_PASSWORD_HASH_ALGORITHM, UserConstants.PARAM_PASSWORD_HASH_ALGORITHM,
-                UserManagerImpl.PARAM_PASSWORD_HASH_ITERATIONS, UserConstants.PARAM_PASSWORD_HASH_ITERATIONS);
+        ConfigurationParameters userConfig;
+        if (config.getSecurityManagerConfig() == null) {
+            userConfig = ConfigurationParameters.EMPTY;
+        } else {
+            userConfig = mapConfigurationParameters(
+                    config.getSecurityManagerConfig().getUserManagerConfig(),
+                    UserManagerImpl.PARAM_USERS_PATH, UserConstants.PARAM_USER_PATH,
+                    UserManagerImpl.PARAM_GROUPS_PATH, UserConstants.PARAM_GROUP_PATH,
+                    UserManagerImpl.PARAM_DEFAULT_DEPTH, UserConstants.PARAM_DEFAULT_DEPTH,
+                    UserManagerImpl.PARAM_PASSWORD_HASH_ALGORITHM, UserConstants.PARAM_PASSWORD_HASH_ALGORITHM,
+                    UserManagerImpl.PARAM_PASSWORD_HASH_ITERATIONS, UserConstants.PARAM_PASSWORD_HASH_ITERATIONS);
+        }
         return ConfigurationParameters.of(ImmutableMap.of(
                 UserConfiguration.NAME,
                 ConfigurationParameters.of(loginConfig, userConfig)));
@@ -965,6 +985,9 @@ public class RepositoryUpgrade {
         boolean longNameFound = false;
         try {
             IndexReader reader = IndexAccessor.getReader(source);
+            if (reader == null) {
+                return;
+            }
             TermEnum terms = reader.terms(new Term(FieldNames.LOCAL_NAME));
             while (terms.next()) {
                 Term t = terms.term();

@@ -50,6 +50,9 @@ import org.apache.jackrabbit.core.data.DataIdentifier;
 import org.apache.jackrabbit.core.data.DataRecord;
 import org.apache.jackrabbit.core.data.DataStoreException;
 import org.apache.jackrabbit.core.data.util.NamedThreadFactory;
+import org.apache.jackrabbit.oak.blob.cloud.s3.S3Constants;
+import org.apache.jackrabbit.oak.blob.cloud.s3.S3RequestDecorator;
+import org.apache.jackrabbit.oak.blob.cloud.s3.Utils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1222,9 +1225,12 @@ public class S3Backend implements SharedS3Backend {
         public void run() {
             try {
                 write(identifier, file, true, callback);
-            } catch (DataStoreException e) {
-                LOG.error("Could not upload [" + identifier + "], file[" + file
+            } catch (Exception e) {
+                LOG.warn("Could not upload [" + identifier + "], file[" + file
                     + "]", e);
+                AsyncUploadResult result = new AsyncUploadResult(identifier, file);
+                result.setException(e);
+                callback.onFailure(result);
             }
 
         }

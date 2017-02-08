@@ -48,7 +48,6 @@ public class RDBDocumentStoreTest extends AbstractDocumentStoreTest {
             for (int i = 0; i < 10; i++) {
                 String id = base + i;
                 UpdateOp up = new UpdateOp(id, true);
-                up.set("_id", id);
                 up.set(NodeDocument.DELETED_ONCE, i % 2 == 1);
                 up.set(NodeDocument.MODIFIED_IN_SECS, now++);
                 boolean success = super.ds.create(Collection.NODES, Collections.singletonList(up));
@@ -77,13 +76,12 @@ public class RDBDocumentStoreTest extends AbstractDocumentStoreTest {
                 // every second is a "regular" path
                 String id = "1:" + (i % 2 == 1 ? "p" : "") + "/" + base + i;
                 UpdateOp up = new UpdateOp(id, true);
-                up.set("_id", id);
                 up.set("_test", base);
                 boolean success = super.ds.create(Collection.NODES, Collections.singletonList(up));
                 assertTrue("document with " + id + " not created", success);
                 removeMe.add(id);
             }
-            System.out.println(removeMe);
+
             List<QueryCondition> conditions = new ArrayList<QueryCondition>();
             List<NodeDocument> result = rds.query(Collection.NODES, NodeDocument.MIN_ID_VALUE, NodeDocument.MAX_ID_VALUE,
                     Arrays.asList("_:/%", "__:/%", "___:/%"), conditions, 10000);

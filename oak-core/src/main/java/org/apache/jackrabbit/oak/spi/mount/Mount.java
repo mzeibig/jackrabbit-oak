@@ -19,12 +19,15 @@
 
 package org.apache.jackrabbit.oak.spi.mount;
 
+import aQute.bnd.annotation.ProviderType;
+
 /**
  * A ContentRepository represents one big tree. A Mount
  * refers to a set of paths in that tree which are possibly
  * stored in a separate physical persistent stores. In a
  * default setup all paths belong to a default Mount.
  */
+@ProviderType
 public interface Mount {
     /**
      * Name of the mount. If this <code>Mount</code>
@@ -72,6 +75,14 @@ public interface Mount {
     String getPathFragmentName();
 
     /**
+     * Checks if this mount supports mounting nodes containing the path fragment
+     * (see {@link #getPathFragmentName()}).
+     *
+     * @return true if the path fragment mounts are supported
+     */
+    boolean isSupportFragment();
+
+    /**
      * Checks if given path belongs to this <code>Mount</code>
      *
      * @param path path to check
@@ -92,4 +103,6 @@ public interface Mount {
      * @return true if this Mount is rooted under given path
      */
     boolean isUnder(String path);
+
+    boolean isDirectlyUnder(String path);
 }

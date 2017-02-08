@@ -545,7 +545,7 @@ relativeNode
 
   And a query like
 
-        select * from [app:Asset] where contains(renditions/original/*, "pluto")
+        select * from [app:Asset] where contains([renditions/original/*], "pluto")
 
   Following index configuration would be required
 
@@ -1169,17 +1169,26 @@ Specific facet related features for Lucene property index can be configured in a
  index definition.
  By default ACL checks are always performed on facets by the Lucene property index however this can be avoided by setting
  the property _secure_ to _false_ in the _facets_ configuration node.
+`@since Oak 1.5.15` The no. of facets to be retrieved is configurable via the _topChildren_ property, which defaults to 10.
+
 ```
+/oak:index/lucene-with-unsecure-facets
+  - jcr:primaryType = "oak:QueryIndexDefinition"
+  - compatVersion = 2
+  - type = "lucene"
+  - async = "async"
+  + facets
+    - topChildren = 100
+    - secure = false
+  + indexRules
+    - jcr:primaryType = "nt:unstructured"
     + nt:base
       + properties
         - jcr:primaryType = "nt:unstructured"
         + jcr:title
           - facets = true
           - propertyIndex = true
-          + facets
-            - secure = false
 ```
-
 
 #### Score Explanation
 
@@ -1621,7 +1630,7 @@ such fields
 [OAK-2853]: https://issues.apache.org/jira/browse/OAK-2853
 [OAK-2892]: https://issues.apache.org/jira/browse/OAK-2892
 [OAK-3367]: https://issues.apache.org/jira/browse/OAK-3367
-[OAK-3994]: https://issues.apache.org/jira/browse/OAK-3394
+[OAK-3994]: https://issues.apache.org/jira/browse/OAK-3994
 [OAK-3981]: https://issues.apache.org/jira/browse/OAK-3981
 [OAK-4516]: https://issues.apache.org/jira/browse/OAK-4516
 [luke]: https://code.google.com/p/luke/

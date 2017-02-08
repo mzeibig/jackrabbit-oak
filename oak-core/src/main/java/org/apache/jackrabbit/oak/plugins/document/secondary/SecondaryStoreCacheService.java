@@ -19,6 +19,12 @@
 
 package org.apache.jackrabbit.oak.plugins.document.secondary;
 
+import static java.util.Arrays.asList;
+import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toBoolean;
+import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toInteger;
+import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toStringArray;
+import static org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils.registerMBean;
+
 import java.util.Collections;
 import java.util.Hashtable;
 import java.util.List;
@@ -30,7 +36,6 @@ import javax.annotation.Nonnull;
 import com.google.common.collect.Lists;
 import org.apache.felix.scr.annotations.Activate;
 import org.apache.felix.scr.annotations.Component;
-import org.apache.felix.scr.annotations.ConfigurationPolicy;
 import org.apache.felix.scr.annotations.Deactivate;
 import org.apache.felix.scr.annotations.Property;
 import org.apache.felix.scr.annotations.PropertyUnbounded;
@@ -58,15 +63,9 @@ import org.osgi.framework.ServiceRegistration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static java.util.Arrays.asList;
-import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toBoolean;
-import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toInteger;
-import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toStringArray;
-import static org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils.registerMBean;
-
 @Component(label = "Apache Jackrabbit Oak DocumentNodeStateCache Provider",
         metatype = true,
-        policy = ConfigurationPolicy.REQUIRE,
+        immediate = true,
         description = "Configures a DocumentNodeStateCache based on a secondary NodeStore"
 )
 public class SecondaryStoreCacheService {
@@ -109,7 +108,7 @@ public class SecondaryStoreCacheService {
     )
     private static final String PROP_ASYNC_OBSERVER = "enableAsyncObserver";
 
-    private static final int PROP_OBSERVER_QUEUE_SIZE_DEFAULT = 1000;
+    private static final int PROP_OBSERVER_QUEUE_SIZE_DEFAULT = BackgroundObserver.DEFAULT_QUEUE_SIZE;
     @Property(
             intValue = PROP_OBSERVER_QUEUE_SIZE_DEFAULT,
             label = "Observer queue size",
@@ -142,6 +141,7 @@ public class SecondaryStoreCacheService {
 
         SecondaryStoreBuilder builder = new SecondaryStoreBuilder(secondaryStoreProvider.getNodeStore())
                 .differ(differ)
+                .metaPropNames(DocumentNodeStore.META_PROP_NAMES)
                 .statisticsProvider(statisticsProvider)
                 .pathFilter(pathFilter);
         SecondaryStoreCache cache = builder.buildCache();

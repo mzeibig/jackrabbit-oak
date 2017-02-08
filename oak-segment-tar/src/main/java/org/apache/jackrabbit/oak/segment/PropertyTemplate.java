@@ -18,12 +18,14 @@
  */
 package org.apache.jackrabbit.oak.segment;
 
-import javax.annotation.Nonnull;
-
 import static com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.jackrabbit.oak.segment.CacheWeights.OBJECT_HEADER_SIZE;
+
+import javax.annotation.Nonnull;
 
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
+import org.apache.jackrabbit.oak.commons.StringUtils;
 
 import com.google.common.collect.ComparisonChain;
 
@@ -31,7 +33,7 @@ import com.google.common.collect.ComparisonChain;
  * A property definition within a template (the property name, the type, and the
  * index within the list of properties for the given node).
  */
-class PropertyTemplate implements Comparable<PropertyTemplate> {
+public class PropertyTemplate implements Comparable<PropertyTemplate> {
 
     /**
      * The index of this property within the list of properties in the node
@@ -102,6 +104,10 @@ class PropertyTemplate implements Comparable<PropertyTemplate> {
     @Override
     public String toString() {
         return name + "(" + type + ")";
+    }
+
+    public int estimateMemoryUsage() {
+        return OBJECT_HEADER_SIZE + 16 + StringUtils.estimateMemoryUsage(name);
     }
 
 }

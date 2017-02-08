@@ -54,7 +54,9 @@ import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.upgrade.RepositorySidegrade;
 import org.apache.jackrabbit.oak.upgrade.cli.container.NodeStoreContainer;
+import org.apache.jackrabbit.oak.upgrade.cli.container.SegmentNodeStoreContainer;
 import org.apache.jackrabbit.oak.upgrade.cli.container.SegmentTarNodeStoreContainer;
+import org.apache.jackrabbit.oak.upgrade.cli.parser.CliArgumentException;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -68,7 +70,7 @@ public abstract class AbstractOak2OakTest {
 
     private static final Logger log = LoggerFactory.getLogger(AbstractOak2OakTest.class);
 
-    protected static SegmentTarNodeStoreContainer testContent;
+    protected static SegmentNodeStoreContainer testContent;
 
     private NodeStore destination;
 
@@ -90,7 +92,7 @@ public abstract class AbstractOak2OakTest {
         if (!tempDir.isDirectory()) {
             Util.unzip(AbstractOak2OakTest.class.getResourceAsStream("/segmentstore.zip"), tempDir);
         }
-        testContent = new SegmentTarNodeStoreContainer(tempDir);
+        testContent = new SegmentNodeStoreContainer(tempDir);
     }
 
     @Before
@@ -117,8 +119,12 @@ public abstract class AbstractOak2OakTest {
     @After
     public void clean() throws IOException {
         try {
-            session.logout();
-            repository.shutdown();
+            if (session != null) {
+                session.logout();
+            }
+            if (repository != null) {
+                repository.shutdown();
+            }
         } finally {
             IOUtils.closeQuietly(getDestinationContainer());
             getDestinationContainer().clean();
@@ -146,7 +152,7 @@ public abstract class AbstractOak2OakTest {
     }
 
     @Test
-    public void validateMigration() throws RepositoryException, IOException {
+    public void validateMigration() throws RepositoryException, IOException, CliArgumentException {
         verifyContent(session);
         verifyBlob(session);
         if (supportsCheckpointMigration()) {

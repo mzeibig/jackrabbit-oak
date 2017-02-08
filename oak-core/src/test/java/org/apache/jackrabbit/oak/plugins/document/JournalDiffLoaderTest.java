@@ -16,25 +16,56 @@
  */
 package org.apache.jackrabbit.oak.plugins.document;
 
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import javax.annotation.Nonnull;
+
+import com.google.common.collect.Sets;
 
 import org.apache.jackrabbit.oak.api.CommitFailedException;
+import org.apache.jackrabbit.oak.cache.CacheStats;
 import org.apache.jackrabbit.oak.plugins.document.memory.MemoryDocumentStore;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
+import org.apache.jackrabbit.oak.spi.state.DefaultNodeStateDiff;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
+import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
+import org.apache.jackrabbit.oak.stats.Clock;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 
 import static com.google.common.collect.Sets.newHashSet;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThat;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 public class JournalDiffLoaderTest {
 
     @Rule
     public DocumentMKBuilderProvider builderProvider = new DocumentMKBuilderProvider();
+
+    private Clock clock;
+
+    @Before
+    public void before() throws Exception {
+        clock = new Clock.Virtual();
+        clock.waitUntil(System.currentTimeMillis());
+    }
+
+    @After
+    public void after() {
+        Revision.resetClockToDefault();
+        ClusterNodeInfo.resetClockToDefault();
+    }
 
     @Test
     public void fromCurrentJournalEntry() throws Exception {
@@ -160,6 +191,147 @@ public class JournalDiffLoaderTest {
 
         DocumentNodeState s2 = ns1.getRoot();
         assertEquals(newHashSet("foo", "bar", "baz"), changeChildNodes(ns1, s1, s2));
+    }
+
+    @Test
+    public void withPath() throws Exception {
+        DocumentNodeStore ns = builderProvider.newBuilder()
+                .setAsyncDelay(0).getNodeStore();
+        NodeBuilder builder = ns.getRoot().builder();
+        builder.child("foo");
+        merge(ns, builder);
+        ns.runBackgroundOperations();
+        DocumentNodeState before = (DocumentNodeState) ns.getRoot().getChildNode("foo");
+        builder = ns.getRoot().builder();
+        builder.child("bar");
+        merge(ns, builder);
+        ns.runBackgroundOperations();
+        builder = ns.getRoot().builder();
+        builder.child("foo").child("a").child("b").child("c");
+        merge(ns, builder);
+        ns.runBackgroundOperations();
+        builder = ns.getRoot().builder();
+        builder.child("bar").child("a").child("b").child("c");
+        merge(ns, builder);
+        ns.runBackgroundOperations();
+        DocumentNodeState after = (DocumentNodeState) ns.getRoot().getChildNode("foo");
+
+        CacheStats cs = getMemoryDiffStats(ns);
+        assertNotNull(cs);
+        cs.resetStats();
+        Set<String> changes = changeChildNodes(ns, before, after);
+        assertEquals(1, changes.size());
+        assertTrue(changes.contains("a"));
+        // must only push /foo, /foo/a, /foo/a/b and /foo/a/b/c into cache
+        assertEquals(4, cs.getElementCount());
+    }
+
+    // OAK-5228
+    @Test
+    public void useJournal() throws Exception {
+        // use virtual clock
+        Revision.setClock(clock);
+        ClusterNodeInfo.setClock(clock);
+
+        final AtomicInteger journalQueryCounter = new AtomicInteger();
+        DocumentStore ds = new MemoryDocumentStore() {
+            @Nonnull
+            @Override
+            public <T extends Document> List<T> query(Collection<T> collection,
+                                                      String fromKey,
+                                                      String toKey,
+                                                      int limit) {
+                if (collection == Collection.JOURNAL) {
+                    journalQueryCounter.incrementAndGet();
+                }
+                return super.query(collection, fromKey, toKey, limit);
+            }
+        };
+        DocumentNodeStore ns1 = builderProvider.newBuilder()
+                .setClusterId(1).clock(clock).setLeaseCheck(false)
+                .setDocumentStore(ds).setAsyncDelay(0).getNodeStore();
+        DocumentNodeStore ns2 = builderProvider.newBuilder()
+                .setClusterId(2).clock(clock).setLeaseCheck(false)
+                .setDocumentStore(ds).setAsyncDelay(0).getNodeStore();
+
+        NodeBuilder b1 = ns1.getRoot().builder();
+        NodeBuilder foo = b1.child("foo");
+        for (int i = 0; i < DocumentMK.MANY_CHILDREN_THRESHOLD + 1; i++) {
+            foo.child("n" + i);
+        }
+        merge(ns1, b1);
+        ns1.runBackgroundOperations();
+        ns2.runBackgroundOperations();
+        clock.waitUntil(clock.getTime() + TimeUnit.MINUTES.toMillis(10));
+
+        NodeBuilder b2 = ns2.getRoot().builder();
+        b2.child("foo").child("bar");
+        merge(ns2, b2);
+        ns2.runBackgroundOperations();
+        ns1.runBackgroundOperations();
+
+        // collect journal entry created for /foo/nX
+        ns1.getJournalGarbageCollector().gc(5, TimeUnit.MINUTES);
+
+        // the next modification updates the root revision
+        // for clusterId 1 past the removed journal entry
+        b1 = ns1.getRoot().builder();
+        b1.child("qux");
+        merge(ns1, b1);
+        ns1.runBackgroundOperations();
+        ns2.runBackgroundOperations();
+
+        // remember before state
+        DocumentNodeState fooBefore = (DocumentNodeState) ns1.getRoot().getChildNode("foo");
+
+        b2 = ns2.getRoot().builder();
+        b2.child("foo").child("baz");
+        merge(ns2, b2);
+        ns2.runBackgroundOperations();
+        ns1.runBackgroundOperations();
+
+        b1 = ns1.getRoot().builder();
+        b1.child("foo").child("bar").remove();
+        merge(ns1, b1);
+        ns1.runBackgroundOperations();
+        ns2.runBackgroundOperations();
+
+        DocumentNodeState fooAfter = (DocumentNodeState) ns1.getRoot().getChildNode("foo");
+        journalQueryCounter.set(0);
+        final Set<String> changes = Sets.newHashSet();
+        fooAfter.compareAgainstBaseState(fooBefore, new DefaultNodeStateDiff() {
+            @Override
+            public boolean childNodeChanged(String name,
+                                            NodeState before,
+                                            NodeState after) {
+                changes.add(name);
+                return true;
+            }
+
+            @Override
+            public boolean childNodeAdded(String name, NodeState after) {
+                changes.add(name);
+                return true;
+            }
+
+            @Override
+            public boolean childNodeDeleted(String name, NodeState before) {
+                changes.add(name);
+                return true;
+            }
+        });
+        assertThat(changes, containsInAnyOrder("bar", "baz"));
+        assertTrue("must use JournalDiffLoader",
+                journalQueryCounter.get() > 0);
+    }
+
+    private static CacheStats getMemoryDiffStats(DocumentNodeStore ns) {
+        for (CacheStats cs : ns.getDiffCache().getStats()) {
+            if (cs.getName().equals("Document-MemoryDiff")) {
+                return cs;
+            }
+        }
+        return null;
     }
 
     private static Set<String> changeChildNodes(DocumentNodeStore store,

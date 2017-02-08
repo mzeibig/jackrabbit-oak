@@ -181,6 +181,21 @@ As seen in the examples above, a revision is a String and may look like this:
 * A counter to distinguish revisions created with the same timestamp: `-2`
 * The cluster node id where this revision was created: `-1`
 
+Clock requirements
+------------------
+
+Revisions are used by the DocumentMK to identify the sequence of changes done
+on items in the repository. This is also done across cluster nodes for revisions
+with different cluster node ids. This requires the system clocks on the machines
+running Oak and the backend system to approximately in sync. It is recommended
+to run an NTP daemon or some similar service to keep the clock synchronized.
+Oak allows clock differences up to 2 seconds between the machine where Oak is
+running and the machine where the backend store (MongoDB or RDBMS) is running.
+Oak may refuse to start if it detects a larger clock difference. Clock
+differences between the machines running in an Oak cluster will result in
+delayed propagation of changes between cluster nodes and warnings in the log
+files.
+
 Branches
 --------
 
@@ -539,12 +554,12 @@ In a default setup the [DocumentNodeStoreService][osgi-config]
 takes a single config for `cache` which is internally distributed among the 
 various caches above in following way
 
-1. `nodeCache` - 25%
-2. `prevDocCache` - 4% 
-3. `childrenCache` - 10% 
-4. `docChildrenCache` - 3% (removed in 1.5.6)
-5. `diffCache` - 5% 
-6. `documentCache` - Is given the rest i.e. 57%
+1. `nodeCache` - 35% (was 25% until 1.5.14)
+2. `prevDocCache` - 4%
+3. `childrenCache` - 15% (was 10% until 1.5.14)
+4. `diffCache` - 30% (was 4% until 1.5.14)
+5. `documentCache` - Is given the rest i.e. 16%
+6. `docChildrenCache` - 0% (removed in 1.5.6, default was 3%)
 
 Lately [options are provided][OAK-2546] to have a fine grained control over the 
 distribution. See [Cache Allocation][cache-allocation]

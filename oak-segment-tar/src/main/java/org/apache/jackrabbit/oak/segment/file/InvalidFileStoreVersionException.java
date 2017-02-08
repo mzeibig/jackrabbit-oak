@@ -24,4 +24,11 @@ package org.apache.jackrabbit.oak.segment.file;
  */
 public class InvalidFileStoreVersionException extends Exception {
 
+    public InvalidFileStoreVersionException() {
+    }
+
+    public InvalidFileStoreVersionException(String message) {
+        super(message);
+    }
+
 }
