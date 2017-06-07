@@ -78,11 +78,14 @@ import org.apache.jackrabbit.oak.api.jmx.CacheStatsMBean;
 import org.apache.jackrabbit.oak.commons.jmx.AnnotatedStandardMBean;
 import org.apache.jackrabbit.oak.plugins.commit.ConflictHook;
 import org.apache.jackrabbit.oak.plugins.commit.DefaultConflictHandler;
+import org.apache.jackrabbit.oak.plugins.metric.MetricStatisticsProvider;
 import org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions;
 import org.apache.jackrabbit.oak.segment.compaction.SegmentRevisionGC;
 import org.apache.jackrabbit.oak.segment.compaction.SegmentRevisionGCMBean;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
+import org.apache.jackrabbit.oak.segment.file.FileStoreBuilder;
 import org.apache.jackrabbit.oak.segment.file.FileStoreGCMonitor;
+import org.apache.jackrabbit.oak.segment.file.MetricsIOMonitor;
 import org.apache.jackrabbit.oak.spi.commit.CommitHook;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.CompositeHook;
@@ -94,7 +97,6 @@ import org.apache.jackrabbit.oak.spi.state.RevisionGC;
 import org.apache.jackrabbit.oak.spi.whiteboard.CompositeRegistration;
 import org.apache.jackrabbit.oak.spi.whiteboard.Registration;
 import org.apache.jackrabbit.oak.stats.Clock;
-import org.apache.jackrabbit.oak.stats.DefaultStatisticsProvider;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -107,9 +109,7 @@ import org.slf4j.LoggerFactory;
  * <p>This is a longevity test for revision garbage collection.</p>
  *
  * <p>The test schedules a number of readers, writers, a compactor and holds some references for a certain time.
- * All of which can be interactively modified through the accompanying
- * {@link SegmentCompactionITMBean}, the
- * {@link SegmentRevisionGC} and the
+ * All of which can be interactively modified through the accompanying {@link SegmentCompactionITMBean} and the {@link SegmentRevisionGC}.
  *
  *<p>The test is <b>disabled</b> by default, to run it you need to set the {@code SegmentCompactionIT} system property:<br>
  * {@code mvn test -Dtest=SegmentCompactionIT -Dtest.opts.memory=-Xmx4G}
@@ -118,6 +118,10 @@ import org.slf4j.LoggerFactory;
  * <p>TODO Leverage longevity test support from OAK-2771 once we have it.</p>
  */
 public class SegmentCompactionIT {
+
+    static {
+        System.setProperty("oak.gc.backoff", "1");
+    }
 
     /** Only run if explicitly asked to via -Dtest=SegmentCompactionIT */
     private static final boolean ENABLED =
@@ -143,8 +147,8 @@ public class SegmentCompactionIT {
 
     private volatile ListenableFuture<?> compactor = immediateCancelledFuture();
     private volatile ReadWriteLock compactionLock = null;
-    private volatile int maxReaders = 10;
-    private volatile int maxWriters = 10;
+    private volatile int maxReaders = Integer.getInteger("SegmentCompactionIT.maxReaders", 10);
+    private volatile int maxWriters = Integer.getInteger("SegmentCompactionIT.maxWriters", 10);
     private volatile long maxStoreSize = 200000000000L;
     private volatile int maxBlobSize = 1000000;
     private volatile int maxStringSize = 100;
@@ -222,16 +226,22 @@ public class SegmentCompactionIT {
         assumeTrue(ENABLED);
 
         ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+        MetricStatisticsProvider statisticsProvider = new MetricStatisticsProvider(mBeanServer, executor);
         SegmentGCOptions gcOptions = defaultGCOptions()
                 .setEstimationDisabled(true)
                 .setForceTimeout(3600);
-        fileStore = fileStoreBuilder(folder.getRoot())
+        FileStoreBuilder builder = fileStoreBuilder(folder.getRoot());
+        fileStore = builder
                 .withMemoryMapping(true)
                 .withGCMonitor(gcMonitor)
                 .withGCOptions(gcOptions)
-                .withStatisticsProvider(new DefaultStatisticsProvider(executor))
+                .withIOMonitor(new MetricsIOMonitor(statisticsProvider))
+                .withStatisticsProvider(statisticsProvider)
                 .build();
-        nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
+        nodeStore = SegmentNodeStoreBuilders.builder(fileStore)
+                .withStatisticsProvider(statisticsProvider)
+                .build();
+        WriterCacheManager cacheManager = builder.getCacheManager();
         Runnable cancelGC = new Runnable() {
             @Override
             public void run() {
@@ -261,18 +271,20 @@ public class SegmentCompactionIT {
         CacheStatsMBean templateCacheStats = fileStore.getTemplateCacheStats();
         registrations.add(registerMBean(templateCacheStats,
                 new ObjectName("IT:TYPE=" + templateCacheStats.getName())));
-        CacheStatsMBean stringDeduplicationCacheStats = fileStore.getStringDeduplicationCacheStats();
+        CacheStatsMBean stringDeduplicationCacheStats = cacheManager.getStringCacheStats();
         assertNotNull(stringDeduplicationCacheStats);
         registrations.add(registerMBean(stringDeduplicationCacheStats,
                 new ObjectName("IT:TYPE=" + stringDeduplicationCacheStats.getName())));
-        CacheStatsMBean templateDeduplicationCacheStats = fileStore.getTemplateDeduplicationCacheStats();
+        CacheStatsMBean templateDeduplicationCacheStats = cacheManager.getTemplateCacheStats();
         assertNotNull(templateDeduplicationCacheStats);
         registrations.add(registerMBean(templateDeduplicationCacheStats,
                 new ObjectName("IT:TYPE=" + templateDeduplicationCacheStats.getName())));
-        CacheStatsMBean nodeDeduplicationCacheStats = fileStore.getNodeDeduplicationCacheStats();
+        CacheStatsMBean nodeDeduplicationCacheStats = cacheManager.getNodeCacheStats();
         assertNotNull(nodeDeduplicationCacheStats);
         registrations.add(registerMBean(nodeDeduplicationCacheStats,
                 new ObjectName("IT:TYPE=" + nodeDeduplicationCacheStats.getName())));
+        registrations.add(registerMBean(nodeStore.getStats(),
+                new ObjectName("IT:TYPE=" + "SegmentNodeStore statistics")));
         mBeanRegistration = new CompositeRegistration(registrations);
     }
 

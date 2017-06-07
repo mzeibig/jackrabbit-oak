@@ -55,10 +55,10 @@ import org.apache.jackrabbit.oak.spi.security.user.UserAuthenticationFactory;
 import org.apache.jackrabbit.oak.spi.security.user.UserConfiguration;
 import org.apache.jackrabbit.oak.spi.security.user.UserConstants;
 import org.apache.jackrabbit.oak.spi.security.user.action.AuthorizableActionProvider;
-import org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardAuthorizableActionProvider;
-import org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardAuthorizableNodeName;
-import org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardRestrictionProvider;
-import org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUserAuthenticationFactory;
+import org.apache.jackrabbit.oak.security.user.whiteboard.WhiteboardAuthorizableActionProvider;
+import org.apache.jackrabbit.oak.security.user.whiteboard.WhiteboardAuthorizableNodeName;
+import org.apache.jackrabbit.oak.security.authorization.restriction.WhiteboardRestrictionProvider;
+import org.apache.jackrabbit.oak.security.user.whiteboard.WhiteboardUserAuthenticationFactory;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.Constants;
 import org.osgi.framework.ServiceRegistration;
@@ -456,8 +456,8 @@ public class SecurityProviderRegistration {
                 return;
             }
 
-            // The preconditions are not satisfied. This may happen when a
-            // dependency is unbound from the current component.
+            // The preconditions are still satisfied. This may happen when a
+            // dependency is unbound while not being listed as required service.
 
             if (preconditions.areSatisfied()) {
                 log.info("Aborting: preconditions are satisfied");

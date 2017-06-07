@@ -45,6 +45,8 @@ import java.util.UUID;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
+import com.google.common.base.Charsets;
+import com.google.common.collect.AbstractIterator;
 import org.apache.commons.io.HexDump;
 import org.apache.commons.io.output.ByteArrayOutputStream;
 import org.apache.jackrabbit.oak.api.PropertyState;
@@ -52,9 +54,6 @@ import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.StringUtils;
 import org.apache.jackrabbit.oak.plugins.memory.PropertyStates;
 import org.apache.jackrabbit.oak.segment.RecordNumbers.Entry;
-
-import com.google.common.base.Charsets;
-import com.google.common.collect.AbstractIterator;
 
 /**
  * A list of records.
@@ -97,7 +96,7 @@ public class Segment {
      * The number of bytes (or bits of address space) to use for the
      * alignment boundary of segment records.
      */
-    public static final int RECORD_ALIGN_BITS = 2; // align at the four-byte boundary
+    static final int RECORD_ALIGN_BITS = 2; // align at the four-byte boundary
 
     /**
      * Maximum segment size. Record identifiers are stored as three-byte
@@ -106,7 +105,7 @@ public class Segment {
      * at four-byte boundaries, the two bytes can address up to 256kB of
      * record data.
      */
-    public static final int MAX_SEGMENT_SIZE = 1 << (16 + RECORD_ALIGN_BITS); // 256kB
+    static final int MAX_SEGMENT_SIZE = 1 << (16 + RECORD_ALIGN_BITS); // 256kB
 
     /**
      * The size limit for small values. The variable length of small values
@@ -122,7 +121,7 @@ public class Segment {
      * value. And since small values are never stored as medium ones, we can
      * extend the size range to cover that many longer values.
      */
-    public static final int MEDIUM_LIMIT = (1 << (16 - 2)) + SMALL_LIMIT;
+    static final int MEDIUM_LIMIT = (1 << (16 - 2)) + SMALL_LIMIT;
 
     /**
      * Maximum size of small blob IDs. A small blob ID is stored in a value
@@ -131,16 +130,13 @@ public class Segment {
      * and the actual length of the blob ID, a maximum of 2^12 values can be
      * stored in the length field.
      */
-    public static final int BLOB_ID_SMALL_LIMIT = 1 << 12;
+    static final int BLOB_ID_SMALL_LIMIT = 1 << 12;
 
-    public static final int GC_GENERATION_OFFSET = 10;
+    static final int GC_GENERATION_OFFSET = 10;
 
-    public static final int REFERENCED_SEGMENT_ID_COUNT_OFFSET = 14;
+    static final int REFERENCED_SEGMENT_ID_COUNT_OFFSET = 14;
 
-    public static final int RECORD_NUMBER_COUNT_OFFSET = 18;
-
-    @Nonnull
-    private final SegmentStore store;
+    static final int RECORD_NUMBER_COUNT_OFFSET = 18;
 
     @Nonnull
     private final SegmentReader reader;
@@ -175,15 +171,14 @@ public class Segment {
      * @return  {@code n = address + a} such that {@code n % boundary == 0} and
      *          {@code 0 <= a < boundary}.
      */
-    public static int align(int address, int boundary) {
+    static int align(int address, int boundary) {
         return (address + boundary - 1) & ~(boundary - 1);
     }
 
-    public Segment(@Nonnull SegmentStore store,
+    public Segment(@Nonnull SegmentIdProvider idProvider,
                    @Nonnull SegmentReader reader,
                    @Nonnull final SegmentId id,
                    @Nonnull final ByteBuffer data) {
-        this.store = checkNotNull(store);
         this.reader = checkNotNull(reader);
         this.id = checkNotNull(id);
         this.data = checkNotNull(data);
@@ -202,7 +197,7 @@ public class Segment {
             });
             this.version = SegmentVersion.fromByte(segmentVersion);
             this.recordNumbers = readRecordNumberOffsets();
-            this.segmentReferences = readReferencedSegments();
+            this.segmentReferences = readReferencedSegments(idProvider);
         } else {
             this.version = LATEST_VERSION;
             this.recordNumbers = new IdentityRecordNumbers();
@@ -253,17 +248,27 @@ public class Segment {
         return new ImmutableRecordNumbers(offsets, types);
     }
 
-    private SegmentReferences readReferencedSegments() {
+    private SegmentReferences readReferencedSegments(
+            final SegmentIdProvider idProvider) {
         checkState(getReferencedSegmentIdCount() + 1 < 0xffff,
                 "Segment cannot have more than 0xffff references");
 
         final int referencedSegmentIdCount = getReferencedSegmentIdCount();
         final int refOffset = data.position() + HEADER_SIZE;
+
+        // We need to keep SegmentId references (as opposed to e.g. UUIDs)
+        // here as frequently resolving the segment ids via the segment id
+        // tables is prohibitively expensive.
+        // These SegmentId references are not a problem wrt. heap usage as
+        // their individual memoised references to their underlying segment
+        // is managed via the SegmentCache. It is the size of that cache that
+        // keeps overall heap usage by Segment instances bounded.
+        // See OAK-6106.
         final SegmentId[] refIds = new SegmentId[referencedSegmentIdCount];
         return new SegmentReferences() {
             @Override
             public SegmentId getSegmentId(int reference) {
-                checkArgument(reference <= referencedSegmentIdCount);
+                checkArgument(reference <= referencedSegmentIdCount, "Segment reference out of bounds");
                 SegmentId id = refIds[reference - 1];
                 if (id == null) {
                     synchronized(refIds) {
@@ -272,7 +277,7 @@ public class Segment {
                             int position = refOffset + (reference - 1) * SEGMENT_REFERENCE_SIZE;
                             long msb = data.getLong(position);
                             long lsb = data.getLong(position + 8);
-                            id = store.newSegmentId(msb, lsb);
+                            id = idProvider.newSegmentId(msb, lsb);
                             refIds[reference - 1] = id;
                         }
                     }
@@ -280,6 +285,7 @@ public class Segment {
                 return id;
             }
 
+            @Nonnull
             @Override
             public Iterator<SegmentId> iterator() {
                 return new AbstractIterator<SegmentId>() {
@@ -297,16 +303,15 @@ public class Segment {
         };
     }
 
-    Segment(@Nonnull SegmentStore store,
+    Segment(@Nonnull SegmentId id,
             @Nonnull SegmentReader reader,
             @Nonnull byte[] buffer,
             @Nonnull RecordNumbers recordNumbers,
             @Nonnull SegmentReferences segmentReferences,
             @Nonnull String info
     ) {
-        this.store = checkNotNull(store);
+        this.id = checkNotNull(id);
         this.reader = checkNotNull(reader);
-        this.id = store.newDataSegmentId();
         this.info = checkNotNull(info);
         this.data = ByteBuffer.wrap(checkNotNull(buffer));
         this.version = SegmentVersion.fromByte(buffer[3]);
@@ -361,7 +366,7 @@ public class Segment {
         return data.getInt(REFERENCED_SEGMENT_ID_COUNT_OFFSET);
     }
 
-    public int getRecordNumberCount() {
+    private int getRecordNumberCount() {
         return data.getInt(RECORD_NUMBER_COUNT_OFFSET);
     }
 
@@ -410,7 +415,7 @@ public class Segment {
      * @return the segment meta data
      */
     @CheckForNull
-    public String getSegmentInfo() {
+    String getSegmentInfo() {
         if (info == null && id.isDataSegmentId()) {
             info = readString(recordNumbers.iterator().next().getRecordNumber());
         }
@@ -445,27 +450,19 @@ public class Segment {
         return data.getLong(pos(recordNumber, 8));
     }
 
-    /**
-     * Reads the given number of bytes starting from the given position
-     * in this segment.
-     *
-     * @param recordNumber position within segment
-     * @param buffer target buffer
-     * @param offset offset within target buffer
-     * @param length number of bytes to read
-     */
-    void readBytes(int recordNumber, byte[] buffer, int offset, int length) {
-        readBytes(recordNumber, 0, buffer, offset, length);
-    }
-
     void readBytes(int recordNumber, int position, byte[] buffer, int offset, int length) {
         checkNotNull(buffer);
         checkPositionIndexes(offset, offset + length, buffer.length);
-        ByteBuffer d = data.duplicate();
-        d.position(pos(recordNumber, position, length));
+        ByteBuffer d = readBytes(recordNumber, position, length);
         d.get(buffer, offset, length);
     }
 
+    ByteBuffer readBytes(int recordNumber, int position, int length) {
+        int pos = pos(recordNumber, position, length);
+        return slice(pos, length);
+    }
+
+    @Nonnull
     RecordId readRecordId(int recordNumber, int rawOffset, int recordIdOffset) {
         return internalReadRecordId(pos(recordNumber, rawOffset, recordIdOffset, RECORD_ID_BYTES));
     }
@@ -478,6 +475,7 @@ public class Segment {
         return readRecordId(recordNumber, 0, 0);
     }
 
+    @Nonnull
     private RecordId internalReadRecordId(int pos) {
         SegmentId segmentId = dereferenceSegmentId(asUnsigned(data.getShort(pos)));
         return new RecordId(segmentId, data.getInt(pos + 2));
@@ -487,6 +485,7 @@ public class Segment {
         return value & 0xffff;
     }
 
+    @Nonnull
     private SegmentId dereferenceSegmentId(int reference) {
         if (reference == 0) {
             return id;
@@ -506,17 +505,9 @@ public class Segment {
         int pos = pos(offset, 1);
         long length = internalReadLength(pos);
         if (length < SMALL_LIMIT) {
-            byte[] bytes = new byte[(int) length];
-            ByteBuffer buffer = data.duplicate();
-            buffer.position(pos + 1);
-            buffer.get(bytes);
-            return new String(bytes, Charsets.UTF_8);
+            return Charsets.UTF_8.decode(slice(pos + 1, (int) length)).toString();
         } else if (length < MEDIUM_LIMIT) {
-            byte[] bytes = new byte[(int) length];
-            ByteBuffer buffer = data.duplicate();
-            buffer.position(pos + 2);
-            buffer.get(bytes);
-            return new String(bytes, Charsets.UTF_8);
+            return Charsets.UTF_8.decode(slice(pos + 2, (int) length)).toString();
         } else if (length < Integer.MAX_VALUE) {
             int size = (int) ((length + BLOCK_SIZE - 1) / BLOCK_SIZE);
             ListRecord list = new ListRecord(internalReadRecordId(pos + 8), size);
@@ -526,6 +517,13 @@ public class Segment {
         } else {
             throw new IllegalStateException("String is too long: " + length);
         }
+    }
+
+    private ByteBuffer slice(int pos, int length) {
+        ByteBuffer buffer = data.duplicate();
+        buffer.position(pos);
+        buffer.limit(pos + length);
+        return buffer.slice();
     }
 
     @Nonnull
@@ -721,7 +719,7 @@ public class Segment {
      * Estimate of how much memory this instance would occupy in the segment
      * cache.
      */
-    public int estimateMemoryUsage() {
+    int estimateMemoryUsage() {
         int size = OBJECT_HEADER_SIZE + 76;
         size += 56; // 7 refs x 8 bytes
 

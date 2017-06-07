@@ -24,11 +24,11 @@ import static com.google.common.collect.Sets.newHashSet;
 import static org.apache.commons.io.FileUtils.ONE_GB;
 import static org.apache.commons.io.FileUtils.ONE_MB;
 import static org.apache.jackrabbit.JcrConstants.JCR_DATA;
+import static org.apache.jackrabbit.oak.InitialContent.INITIAL_CONTENT;
 import static org.apache.jackrabbit.oak.api.Type.BINARIES;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.INDEX_DATA_CHILD_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.OakDirectory.PROP_BLOB_SIZE;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.OakDirectory.UNIQUE_KEY_SIZE;
-import static org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent.INITIAL_CONTENT;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -56,9 +56,11 @@ import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.plugins.memory.ArrayBasedBlob;
 import org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState;
 import org.apache.jackrabbit.oak.plugins.memory.PropertyStates;
-import org.apache.jackrabbit.oak.plugins.segment.Segment;
-import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeStore;
-import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
+import org.apache.jackrabbit.oak.segment.SegmentNodeStore;
+import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
+import org.apache.jackrabbit.oak.segment.SegmentTestConstants;
+import org.apache.jackrabbit.oak.segment.file.FileStore;
+import org.apache.jackrabbit.oak.segment.file.FileStoreBuilder;
 import org.apache.jackrabbit.oak.spi.blob.MemoryBlobStore;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
@@ -339,11 +341,11 @@ public class OakDirectoryTest {
 
     @Test
     public void largeFile() throws Exception{
-        FileStore store = FileStore.builder(tempFolder.getRoot())
+        FileStore store = FileStoreBuilder.fileStoreBuilder(tempFolder.getRoot())
                 .withMemoryMapping(false)
                 .withBlobStore(new BlackHoleBlobStore())
                 .build();
-        SegmentNodeStore nodeStore = SegmentNodeStore.builder(store).build();
+        SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(store).build();
         IndexDefinition defn = new IndexDefinition(INITIAL_CONTENT, EmptyNodeState.EMPTY_NODE, "/foo");
         Directory directory = new OakDirectory(nodeStore.getRoot().builder(), defn, false);
 
@@ -393,15 +395,15 @@ public class OakDirectoryTest {
     @Test
     public void dirNameInException_Writes() throws Exception{
         FailOnDemandBlobStore blobStore = new FailOnDemandBlobStore();
-        FileStore store = FileStore.builder(tempFolder.getRoot())
+        FileStore store = FileStoreBuilder.fileStoreBuilder(tempFolder.getRoot())
                 .withMemoryMapping(false)
                 .withBlobStore(blobStore)
                 .build();
-        SegmentNodeStore nodeStore = SegmentNodeStore.builder(store).build();
+        SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(store).build();
 
         String indexPath = "/foo/bar";
 
-        int minFileSize = Segment.MEDIUM_LIMIT;
+        int minFileSize = SegmentTestConstants.MEDIUM_LIMIT;
         int blobSize = minFileSize + 1000;
 
         builder = nodeStore.getRoot().builder();

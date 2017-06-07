@@ -47,6 +47,7 @@ import java.util.Map.Entry;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.CRC32;
@@ -55,6 +56,7 @@ import javax.annotation.Nonnull;
 
 import com.google.common.base.Charsets;
 import com.google.common.base.Predicate;
+import com.google.common.base.Stopwatch;
 import com.google.common.collect.Sets;
 import org.apache.commons.io.FileUtils;
 import org.apache.jackrabbit.oak.plugins.blob.ReferenceCollector;
@@ -131,7 +133,7 @@ class TarReader implements Closeable {
 
         // regenerate the first generation based on the recovered data
         File file = sorted.values().iterator().next();
-        generateTarFile(entries, file, recovery);
+        generateTarFile(entries, file, recovery, ioMonitor);
 
         reader = openFirstFileWithValidIndex(singletonList(file), memoryMapping, ioMonitor);
         if (reader != null) {
@@ -159,7 +161,7 @@ class TarReader implements Closeable {
             LinkedHashMap<UUID, byte[]> entries = newLinkedHashMap();
             collectFileEntries(file, entries, false);
             file = findAvailGen(file, ".ro.bak");
-            generateTarFile(entries, file, recovery);
+            generateTarFile(entries, file, recovery, ioMonitor);
             reader = openFirstFileWithValidIndex(singletonList(file), memoryMapping, ioMonitor);
             if (reader != null) {
                 return reader;
@@ -205,10 +207,10 @@ class TarReader implements Closeable {
      * @param file
      * @throws IOException
      */
-    private static void generateTarFile(LinkedHashMap<UUID, byte[]> entries, File file, TarRecovery recovery) throws IOException {
+    private static void generateTarFile(LinkedHashMap<UUID, byte[]> entries, File file, TarRecovery recovery, IOMonitor ioMonitor) throws IOException {
         log.info("Regenerating tar file {}", file);
 
-        try (TarWriter writer = new TarWriter(file)) {
+        try (TarWriter writer = new TarWriter(file, ioMonitor)) {
             for (Entry<UUID, byte[]> entry : entries.entrySet()) {
                 try {
                     recovery.recoverEntry(entry.getKey(), entry.getValue(), writer);
@@ -574,8 +576,7 @@ class TarReader implements Closeable {
         if (position != -1) {
             int pos = index.getInt(position + 16);
             int len = index.getInt(position + 20);
-            ioMonitor.onSegmentRead(file, msb, lsb, len);
-            return access.read(pos, len);
+            return readSegment(msb, lsb, pos, len);
         } else {
             return null;
         }
@@ -842,13 +843,17 @@ class TarReader implements Closeable {
                 name.substring(0, pos) + (char) (generation + 1) + ".tar");
 
         log.debug("Writing new generation {}", newFile.getName());
-        TarWriter writer = new TarWriter(newFile);
+        TarWriter writer = new TarWriter(newFile, ioMonitor);
         for (TarEntry entry : entries) {
             if (entry != null) {
-                byte[] data = new byte[entry.size()];
-                ioMonitor.onSegmentRead(file, entry.msb(), entry.lsb(), entry.size());
-                access.read(entry.offset(), entry.size()).get(data);
-                writer.writeEntry(entry.msb(), entry.lsb(), data, 0, entry.size(), entry.generation());
+                long msb = entry.msb();
+                long lsb = entry.lsb();
+                int offset = entry.offset();
+                int size = entry.size();
+                int gen = entry.generation();
+                byte[] data = new byte[size];
+                readSegment(msb, lsb, offset, size).get(data);
+                writer.writeEntry(msb, lsb, data, 0, size, gen);
             }
         }
 
@@ -1107,6 +1112,15 @@ class TarReader implements Closeable {
         hasGraph = true;
 
         return graph;
+    }
+
+    private ByteBuffer readSegment(long msb, long lsb, int offset, int size) throws IOException {
+        ioMonitor.beforeSegmentRead(file, msb, lsb, size);
+        Stopwatch stopwatch = Stopwatch.createStarted();
+        ByteBuffer buffer = access.read(offset, size);
+        long elapsed = stopwatch.elapsed(TimeUnit.NANOSECONDS);
+        ioMonitor.afterSegmentRead(file, msb, lsb, size, elapsed);
+        return buffer;
     }
 
     private static Map<UUID, List<UUID>> parseGraph(ByteBuffer buffer, boolean bulkOnly) {

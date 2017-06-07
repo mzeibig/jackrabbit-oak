@@ -77,13 +77,25 @@
     </dependency>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>oak-core-spi</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>oak-store-spi</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-core</artifactId>
       <version>${project.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
-      <artifactId>oak-segment</artifactId>
+      <artifactId>oak-segment-tar</artifactId>
       <version>${project.version}</version>
       <scope>test</scope>
     </dependency>
@@ -96,6 +108,12 @@
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-lucene</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>oak-store-composite</artifactId>
       <version>${project.version}</version>
       <scope>test</scope>
     </dependency>

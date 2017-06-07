@@ -18,14 +18,15 @@ package org.apache.jackrabbit.oak.jcr;
 
 import java.io.File;
 import java.util.Properties;
+
 import javax.jcr.Repository;
 import javax.jcr.RepositoryException;
 import javax.jcr.Session;
 
 import org.apache.jackrabbit.oak.Oak;
-import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeStore;
-import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
-import org.apache.jackrabbit.oak.query.QueryEngineSettings;
+import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
+import org.apache.jackrabbit.oak.segment.file.FileStore;
+import org.apache.jackrabbit.oak.segment.file.FileStoreBuilder;
 
 /**
  * A repository stub implementation for Oak on TarMK
@@ -51,11 +52,9 @@ public class OakTarMKRepositoryStub extends OakRepositoryStub {
         try {
             File directory =
                     new File("target", "tarmk-" + System.currentTimeMillis());
-            this.store = FileStore.builder(directory).withMaxFileSize(1).withMemoryMapping(false).build();
-            Jcr jcr = new Jcr(new Oak(SegmentNodeStore.builder(store).build()));
-            QueryEngineSettings qs = new QueryEngineSettings();
-            qs.setFullTextComparisonWithoutIndex(true);
-            jcr.with(qs);
+            this.store = FileStoreBuilder.fileStoreBuilder(directory).withMaxFileSize(1).withMemoryMapping(false).build();
+            Jcr jcr = new Jcr(new Oak(SegmentNodeStoreBuilders.builder(store).build()));
+            jcr.with(getQueryEngineSettings());
             preCreateRepository(jcr);
             this.repository = jcr.createRepository();
 

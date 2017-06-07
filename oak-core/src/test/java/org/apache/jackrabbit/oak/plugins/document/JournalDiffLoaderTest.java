@@ -28,6 +28,7 @@ import com.google.common.collect.Sets;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.cache.CacheStats;
 import org.apache.jackrabbit.oak.plugins.document.memory.MemoryDocumentStore;
+import org.apache.jackrabbit.oak.plugins.document.util.Utils;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
 import org.apache.jackrabbit.oak.spi.state.DefaultNodeStateDiff;
@@ -35,7 +36,7 @@ import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.stats.Clock;
-import org.junit.After;
+import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -59,10 +60,12 @@ public class JournalDiffLoaderTest {
     public void before() throws Exception {
         clock = new Clock.Virtual();
         clock.waitUntil(System.currentTimeMillis());
+        Revision.setClock(clock);
+        ClusterNodeInfo.setClock(clock);
     }
 
-    @After
-    public void after() {
+    @AfterClass
+    public static void resetClock() {
         Revision.resetClockToDefault();
         ClusterNodeInfo.resetClockToDefault();
     }
@@ -70,7 +73,7 @@ public class JournalDiffLoaderTest {
     @Test
     public void fromCurrentJournalEntry() throws Exception {
         DocumentNodeStore ns = builderProvider.newBuilder()
-                .setAsyncDelay(0).getNodeStore();
+                .clock(clock).setAsyncDelay(0).getNodeStore();
         DocumentNodeState s1 = ns.getRoot();
         NodeBuilder builder = ns.getRoot().builder();
         builder.child("foo");
@@ -83,7 +86,7 @@ public class JournalDiffLoaderTest {
     @Test
     public void fromSingleJournalEntry() throws Exception {
         DocumentNodeStore ns = builderProvider.newBuilder()
-                .setAsyncDelay(0).getNodeStore();
+                .clock(clock).setAsyncDelay(0).getNodeStore();
         DocumentNodeState s1 = ns.getRoot();
         NodeBuilder builder = ns.getRoot().builder();
         builder.child("foo");
@@ -97,7 +100,7 @@ public class JournalDiffLoaderTest {
     @Test
     public void fromJournalAndCurrentEntry() throws Exception {
         DocumentNodeStore ns = builderProvider.newBuilder()
-                .setAsyncDelay(0).getNodeStore();
+                .clock(clock).setAsyncDelay(0).getNodeStore();
         DocumentNodeState s1 = ns.getRoot();
         NodeBuilder builder = ns.getRoot().builder();
         builder.child("foo");
@@ -116,7 +119,7 @@ public class JournalDiffLoaderTest {
     @Test
     public void fromMultipleJournalEntries() throws Exception {
         DocumentNodeStore ns = builderProvider.newBuilder()
-                .setAsyncDelay(0).getNodeStore();
+                .clock(clock).setAsyncDelay(0).getNodeStore();
         DocumentNodeState s1 = ns.getRoot();
         NodeBuilder builder = ns.getRoot().builder();
         builder.child("foo");
@@ -141,7 +144,7 @@ public class JournalDiffLoaderTest {
     @Test
     public void fromPartialJournalEntry() throws Exception {
         DocumentNodeStore ns = builderProvider.newBuilder()
-                .setAsyncDelay(0).getNodeStore();
+                .clock(clock).setAsyncDelay(0).getNodeStore();
         DocumentNodeState s1 = ns.getRoot();
         NodeBuilder builder = ns.getRoot().builder();
         builder.child("foo");
@@ -168,9 +171,9 @@ public class JournalDiffLoaderTest {
     public void fromExternalChange() throws Exception {
         DocumentStore store = new MemoryDocumentStore();
         DocumentNodeStore ns1 = builderProvider.newBuilder().setClusterId(1)
-                .setDocumentStore(store).setAsyncDelay(0).getNodeStore();
+                .clock(clock).setDocumentStore(store).setAsyncDelay(0).getNodeStore();
         DocumentNodeStore ns2 = builderProvider.newBuilder().setClusterId(2)
-                .setDocumentStore(store).setAsyncDelay(0).getNodeStore();
+                .clock(clock).setDocumentStore(store).setAsyncDelay(0).getNodeStore();
 
         DocumentNodeState s1 = ns1.getRoot();
         NodeBuilder builder = ns1.getRoot().builder();
@@ -196,7 +199,7 @@ public class JournalDiffLoaderTest {
     @Test
     public void withPath() throws Exception {
         DocumentNodeStore ns = builderProvider.newBuilder()
-                .setAsyncDelay(0).getNodeStore();
+                .clock(clock).setAsyncDelay(0).getNodeStore();
         NodeBuilder builder = ns.getRoot().builder();
         builder.child("foo");
         merge(ns, builder);
@@ -229,10 +232,6 @@ public class JournalDiffLoaderTest {
     // OAK-5228
     @Test
     public void useJournal() throws Exception {
-        // use virtual clock
-        Revision.setClock(clock);
-        ClusterNodeInfo.setClock(clock);
-
         final AtomicInteger journalQueryCounter = new AtomicInteger();
         DocumentStore ds = new MemoryDocumentStore() {
             @Nonnull
@@ -323,6 +322,26 @@ public class JournalDiffLoaderTest {
         assertThat(changes, containsInAnyOrder("bar", "baz"));
         assertTrue("must use JournalDiffLoader",
                 journalQueryCounter.get() > 0);
+    }
+
+    @Test
+    public void emptyBranchCommit() throws Exception {
+        DocumentNodeStore ns = builderProvider.newBuilder()
+                .clock(clock).setAsyncDelay(0).disableBranches().getNodeStore();
+        DocumentStore store = ns.getDocumentStore();
+        DocumentNodeState before = ns.getRoot();
+        String id = Utils.getIdFromPath("/node-0");
+        NodeBuilder builder = ns.getRoot().builder();
+        int i = 0;
+        while (store.find(Collection.NODES, id) == null) {
+            NodeBuilder child = builder.child("node-" + i++);
+            for (int j = 0; j < 20; j++) {
+                child.setProperty("p-" + j, "value");
+            }
+        }
+        merge(ns, builder);
+        DocumentNodeState after = ns.getRoot();
+        new JournalDiffLoader(before, after, ns).call();
     }
 
     private static CacheStats getMemoryDiffStats(DocumentNodeStore ns) {

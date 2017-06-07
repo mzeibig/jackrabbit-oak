@@ -48,7 +48,8 @@ public class MongoFactory implements NodeStoreFactory {
     }
 
     @Override
-    public NodeStore create(BlobStore blobStore, Closer closer) throws UnknownHostException {
+    public NodeStore create(BlobStore blobStore, Closer closer) throws IOException {
+        System.setProperty(DocumentNodeStore.SYS_PROP_DISABLE_JOURNAL, "true");
         DocumentMK.Builder builder = getBuilder(cacheSize);
         builder.setMongoDB(getDB(closer));
         if (blobStore != null) {
@@ -58,6 +59,10 @@ public class MongoFactory implements NodeStoreFactory {
             builder.setReadOnlyMode();
         }
         DocumentNodeStore documentNodeStore = builder.getNodeStore();
+
+        // TODO probably we should disable all observers, see OAK-5651
+        documentNodeStore.getBundlingConfigHandler().unregisterObserver();
+
         closer.register(asCloseable(documentNodeStore));
         return documentNodeStore;
     }

@@ -23,9 +23,7 @@ import java.util.Map;
 
 import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStoreService;
 import org.apache.jackrabbit.oak.plugins.document.MongoUtils;
-import org.apache.jackrabbit.oak.stats.StatisticsProvider;
 import org.junit.After;
-import org.junit.Before;
 import org.junit.BeforeClass;
 
 import static com.google.common.collect.Maps.newHashMap;
@@ -64,6 +62,6 @@ public class DocumentBlobTrackerRegistrationTest extends AbstractBlobTrackerRegi
 
     @Override
     protected void unregisterNodeStoreService() {
-        deactivate(service);
+        deactivate(service, context.bundleContext());
     }
 }

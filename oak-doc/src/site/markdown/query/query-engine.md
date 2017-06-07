@@ -83,6 +83,33 @@ so the method should be reasonably fast (not read any data itself, or at least n
 
 If an index implementation can not query the data, it has to return `Infinity` (`Double.POSITIVE_INFINITY`).
 
+#### Query Options
+
+By default, queries without index will log an info level message as follows
+(see OAK-4888, since Oak 1.6):
+
+    Traversal query (query without index): {statement}; consider creating an index
+
+This message is only logged if no index is available, and if the query
+potentially traverses many nodes. 
+No message is logged if an index is available, but traversing is cheap.
+
+By setting the JMX configuration `QueryEngineSettings.failTraversal` to true,
+queries without index throw an exception instead of just logging a message.
+
+In the query itself, the syntax `option(traversal {ok|fail|warn})` is supported 
+(at the very end of the statement, after `order by`).
+This is to override the default setting, 
+for queries that traverse a well known number of nodes (for example 10 or 20 nodes).
+This is supported for both XPath and SQL-2, as follows: 
+
+    /jcr:root/oak:index/*[@type='lucene'] option(traversal ok)
+
+    select * from [nt:base] 
+    where ischildnode('/oak:index') 
+    order by name()
+    option(traversal ok)
+
 ### Compatibility
 
 #### Result Size
@@ -150,6 +177,33 @@ As a workaround, these limits can be changed using the system properties
 "oak.queryLimitInMemory" and "oak.queryLimitReads".
 Queries that exceed one of the limits are cancelled with an UnsupportedOperationException saying that 
 "The query read more than x nodes... To avoid running out of memory, processing was stopped."
+
+"LimitReads" applies to the number of nodes read by a query. 
+It applies whether or not an index is used.
+As an example, if a query has just two conditions, as in `a=1 and b=2`, and if there is an index on `a`,
+then all nodes with `a=1` need to be read while traversing the result.
+If more nodes are read than the set limit, then an exception is thrown.
+If the query also has a path condition (for example descendants of `/home`), 
+and if the index supports path conditions (which is the case for all property indexes, and
+also for Lucene indexes if `evaluatePathRestrictions` is set), then only nodes in the given subtree
+are read.
+
+"LimitInMemory" applies to nodes read in memory, in order to sort the result, 
+and in order to ensure the same node is only returned once. 
+It applies whether or not an index is used.
+As an example, if a query uses `order by c`, and if the index used for this query does not
+support ordering by this property, then all nodes that match the condition are read in memory first,
+even before the first node is returned.
+Property indexed can not order, and Lucene indexes can only order when enabling `ordered` for a property.
+Ensuring the same node is only returned once: this is needed for queries that contain `union`
+(it is not needed when using `union all`). It is also needed if a query uses `or` conditions
+on different properties. For example, if a query uses `a=1 or b=2`, 
+then the conversion to `union` would be `select ... where a=1 union select ... where b=2`.
+The query is converted to a `union` so that both indexes can be used, 
+in case there are separate indexes for `a` and `b`.
+For XPath queries, such conversion to `union` is always made, 
+and for SQL-2 queries such a conversion is only made if the `union` query has a lower expected cost.
+When using `or` in combination with the same property, as in `a=1 or a=2`, then no conversion to `union` is made.
 
 ### Full-Text Queries
 

@@ -29,19 +29,19 @@ import java.util.List;
 
 import javax.jcr.RepositoryException;
 
+import com.google.common.collect.ImmutableList;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.commons.junit.LogCustomizer;
 import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
 import org.apache.jackrabbit.oak.plugins.index.IndexUpdateProvider;
 import org.apache.jackrabbit.oak.plugins.index.IndexUtils;
-import org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent;
+import org.apache.jackrabbit.oak.InitialContent;
 import org.apache.jackrabbit.oak.plugins.tree.TreeFactory;
 import org.apache.jackrabbit.oak.spi.commit.CommitHook;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EditorHook;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
-import org.apache.jackrabbit.oak.util.NodeUtil;
 import org.junit.Test;
 
 import ch.qos.logback.classic.Level;
@@ -58,9 +58,9 @@ public class OrderedPropertyIndexEditorProviderTest {
     private void createIndexDef(NodeBuilder root) throws RepositoryException {
         IndexUtils
         .createIndexDefinition(
-            new NodeUtil(TreeFactory.createTree(root
-                .child(IndexConstants.INDEX_DEFINITIONS_NAME))), indexName, false,
-            new String[] { indexedProperty }, null, OrderedIndex.TYPE);
+            TreeFactory.createTree(root
+                .child(IndexConstants.INDEX_DEFINITIONS_NAME)), indexName, false,
+            ImmutableList.of(indexedProperty), null, OrderedIndex.TYPE, null);
     }
     
     @Test

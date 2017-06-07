@@ -18,6 +18,8 @@ package org.apache.jackrabbit.oak.plugins.document;
 
 import javax.annotation.Nonnull;
 
+import org.apache.jackrabbit.oak.stats.Clock;
+
 /**
  * A revision context for tests.
  */
@@ -50,5 +52,17 @@ public class DummyRevisionContext implements RevisionContext {
     @Override
     public Revision newRevision() {
         return Revision.newRevision(getClusterId());
+    }
+
+    @Nonnull
+    @Override
+    public Clock getClock() {
+        return Clock.SIMPLE;
+    }
+
+    @Override
+    public String getCommitValue(@Nonnull Revision changeRevision,
+                                 @Nonnull NodeDocument doc) {
+        return doc.resolveCommitValue(changeRevision);
     }
 }

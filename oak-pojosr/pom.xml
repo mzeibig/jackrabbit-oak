@@ -41,7 +41,7 @@
       <plugin>
         <groupId>org.codehaus.gmaven</groupId>
         <artifactId>gmaven-plugin</artifactId>
-        <version>1.4</version>
+        <version>1.5</version>
         <!--suppress MavenModelInspection -->
         <configuration>
           <providerSelection>2.0</providerSelection>
@@ -87,11 +87,6 @@
   </build>
 
   <dependencies>
-    <dependency>
-      <groupId>org.apache.jackrabbit</groupId>
-      <artifactId>oak-segment</artifactId>
-      <version>${project.version}</version>
-    </dependency>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-segment-tar</artifactId>
@@ -181,7 +176,6 @@
     <dependency>
       <groupId>org.apache.felix</groupId>
       <artifactId>org.apache.felix.jaas</artifactId>
-      <version>0.0.2</version>
     </dependency>
     <dependency>
       <groupId>org.apache.aries.jmx</groupId>
@@ -251,6 +245,18 @@
 
 
     <!-- Test dependencies -->
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>oak-api</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>oak-store-composite</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-core</artifactId>

@@ -28,7 +28,6 @@ import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.stats.Clock;
 import org.junit.After;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.slf4j.Logger;
@@ -149,7 +148,6 @@ public class JournalGCTest {
      * thus end up missing by later on in addTo.
      */
     @Test
-    @Ignore("OAK-5601")
     public void gcCausingMissingJournalEntries() throws Exception {
         // cluster setup
         final Semaphore enteringFind = new Semaphore(0);
@@ -192,7 +190,7 @@ public class JournalGCTest {
         NodeBuilder builder = writingNs.getRoot().builder();
         NodeBuilder foo = builder.child("foo");
         // cause a branch commit
-        for(int i=0; i<DocumentRootBuilder.UPDATE_LIMIT + 1; i++) {
+        for(int i=0; i<DocumentMK.UPDATE_LIMIT + 1; i++) {
             foo.setProperty(String.valueOf(i), "foobar");
         }
         writingNs.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);

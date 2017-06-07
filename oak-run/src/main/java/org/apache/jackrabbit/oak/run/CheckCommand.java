@@ -17,15 +17,19 @@
 
 package org.apache.jackrabbit.oak.run;
 
-import static org.apache.jackrabbit.oak.plugins.segment.FileStoreHelper.isValidFileStoreOrFail;
+import static org.apache.jackrabbit.oak.segment.FileStoreHelper.isValidFileStoreOrFail;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 import joptsimple.ArgumentAcceptingOptionSpec;
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
 import joptsimple.OptionSpec;
+import org.apache.jackrabbit.oak.run.commons.Command;
 
 class CheckCommand implements Command {
 
@@ -35,56 +39,46 @@ class CheckCommand implements Command {
         ArgumentAcceptingOptionSpec<String> journal = parser.accepts(
                 "journal", "journal file")
                 .withRequiredArg().ofType(String.class).defaultsTo("journal.log");
-        OptionSpec deep = parser.accepts(
-                "deep", "<deprecated> enable deep consistency checking. ");
+        OptionSpec<?> deep = parser.accepts(
+                "deep", "<deprecated> enable deep consistency checking.");
         ArgumentAcceptingOptionSpec<Long> notify = parser.accepts(
                 "notify", "number of seconds between progress notifications")
                 .withRequiredArg().ofType(Long.class).defaultsTo(Long.MAX_VALUE);
-        ArgumentAcceptingOptionSpec<Long> bin = parser.accepts(
-                "bin", "read the first n bytes from binary properties.")
-                .withRequiredArg().ofType(Long.class);
-        OptionSpec segment = parser.accepts("segment", "Use oak-segment instead of oak-segment-tar");
-        OptionSpec ioStatistics = parser.accepts("io-stats", "Print I/O statistics (only for oak-segment-tar)");
+        OptionSpec<?> bin = parser.accepts("bin", "read the content of binary properties");
+        ArgumentAcceptingOptionSpec<String> filter = parser.accepts(
+                "filter", "comma separated content paths to be checked")
+                .withRequiredArg().ofType(String.class).withValuesSeparatedBy(',').defaultsTo("/");
+        OptionSpec<?> ioStatistics = parser.accepts("io-stats", "Print I/O statistics (only for oak-segment-tar)");
 
         OptionSet options = parser.parse(args);
+        
+        PrintWriter out = new PrintWriter(System.out, true);
+        PrintWriter err = new PrintWriter(System.err, true);
 
         if (options.nonOptionArguments().size() != 1) {
-            printUsage(parser);
+            printUsage(parser, err);
         }
 
         File dir = isValidFileStoreOrFail(new File(options.nonOptionArguments().get(0).toString()));
         String journalFileName = journal.value(options);
         long debugLevel = notify.value(options);
-
-        long binLen = -1L;
-        
-        if (options.has(bin)) {
-            binLen = bin.value(options);
-
-            if (binLen < 0) {
-                printUsage(parser, "The value for --bin option must be a positive number!");
-            }
-        }
+        Set<String> filterPaths = new LinkedHashSet<String>(filter.values(options));
 
         if (options.has(deep)) {
-            printUsage(parser, "The --deep option was deprecated! Please do not use it in the future!"
+            printUsage(parser, err, "The --deep option was deprecated! Please do not use it in the future!"
                     , "A deep scan of the content tree, traversing every node, will be performed by default.");
         }
         
-        if (options.has(segment)) {
-            SegmentUtils.check(dir, journalFileName, true, debugLevel, binLen);
-        } else {
-            SegmentTarUtils.check(dir, journalFileName, true, debugLevel, binLen, options.has(ioStatistics));
-        }
+        SegmentTarUtils.check(dir, journalFileName, debugLevel, options.has(bin), filterPaths, options.has(ioStatistics), out, err);
     }
 
-    private void printUsage(OptionParser parser, String... messages) throws IOException {
+    private void printUsage(OptionParser parser, PrintWriter err, String... messages) throws IOException {
         for (String message : messages) {
-            System.err.println(message);
+            err.println(message);
         }
         
-        System.err.println("usage: check path/to/segmentstore <options>");
-        parser.printHelpOn(System.err);
+        err.println("usage: check path/to/segmentstore <options>");
+        parser.printHelpOn(err);
         System.exit(1);
     }
 

@@ -20,12 +20,12 @@ package org.apache.jackrabbit.oak.jcr.observation;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.Collections.emptyMap;
 import static org.apache.jackrabbit.api.stats.RepositoryStatistics.Type.OBSERVATION_EVENT_COUNTER;
 import static org.apache.jackrabbit.api.stats.RepositoryStatistics.Type.OBSERVATION_EVENT_DURATION;
 import static org.apache.jackrabbit.oak.plugins.observation.ChangeCollectorProvider.COMMIT_CONTEXT_OBSERVATION_CHANGESET;
 import static org.apache.jackrabbit.oak.plugins.observation.filter.VisibleFilter.VISIBLE_FILTER;
 import static org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils.registerMBean;
-import static org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils.registerObserver;
 import static org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils.scheduleWithFixedDelay;
 
 import java.util.Map;
@@ -57,15 +57,17 @@ import org.apache.jackrabbit.oak.spi.commit.BackgroundObserver;
 import org.apache.jackrabbit.oak.spi.commit.BackgroundObserverMBean;
 import org.apache.jackrabbit.oak.spi.commit.CommitContext;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
+import org.apache.jackrabbit.oak.spi.commit.Observer;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.whiteboard.CompositeRegistration;
 import org.apache.jackrabbit.oak.spi.whiteboard.Registration;
 import org.apache.jackrabbit.oak.spi.whiteboard.Whiteboard;
 import org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardExecutor;
+import org.apache.jackrabbit.oak.stats.Clock;
 import org.apache.jackrabbit.oak.stats.MeterStats;
 import org.apache.jackrabbit.oak.stats.StatisticManager;
 import org.apache.jackrabbit.oak.stats.TimerStats;
-import org.apache.jackrabbit.oak.util.PerfLogger;
+import org.apache.jackrabbit.oak.commons.benchmark.PerfLogger;
 import org.apache.jackrabbit.stats.TimeSeriesMax;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -113,7 +115,19 @@ class ChangeProcessor implements FilteringAwareObserver {
      * kicks in.
      */
     public static final int MAX_DELAY;
-    
+
+    //It'd would have been more useful to have following 2 properties as instance variables
+    //which got set by tests. But, the tests won't get a handle to the actual instance, so
+    //static-members it is.
+    /**
+     * Number of milliseconds to wait before issuing consecutive queue full warn messages
+     * Controlled by command line property "oak.observation.full-queue.warn.interval".
+     * Note, the command line parameter is wait interval in minutes.
+     */
+    static long QUEUE_FULL_WARN_INTERVAL = TimeUnit.MINUTES.toMillis(Integer
+            .getInteger("oak.observation.full-queue.warn.interval", 30));
+    static Clock clock = Clock.SIMPLE;
+
     // OAK-4533: make DELAY_THRESHOLD and MAX_DELAY adjustable - using System.properties for now
     static {
         final String delayThresholdStr = System.getProperty("oak.commitRateLimiter.delayThreshold");
@@ -256,7 +270,7 @@ class ChangeProcessor implements FilteringAwareObserver {
         Map<String, String> attrs = ImmutableMap.of(LISTENER_ID, listenerId);
         String name = tracker.toString();
         registration = new CompositeRegistration(
-            registerObserver(whiteboard, filteringObserver),
+            whiteboard.register(Observer.class, filteringObserver, emptyMap()),
             registerMBean(whiteboard, EventListenerMBean.class,
                     tracker.getListenerMBean(), "EventListener", name, attrs),
             registerMBean(whiteboard, BackgroundObserverMBean.class,
@@ -294,6 +308,8 @@ class ChangeProcessor implements FilteringAwareObserver {
             private volatile long delay;
             private volatile boolean blocking;
 
+            private long lastQueueFullWarnTimestamp = -1;
+
             @Override
             protected void added(int newQueueSize) {
                 queueSizeChanged(newQueueSize);
@@ -310,11 +326,11 @@ class ChangeProcessor implements FilteringAwareObserver {
                 if (newQueueSize >= queueLength) {
                     if (commitRateLimiter != null) {
                         if (!blocking) {
-                            LOG.warn("Revision queue is full. Further commits will be blocked.");
+                            logQueueFullWarning("Revision queue is full. Further commits will be blocked.");
                         }
                         commitRateLimiter.blockCommits();
                     } else if (!blocking) {
-                        LOG.warn("Revision queue is full. Further revisions will be compacted.");
+                        logQueueFullWarning("Revision queue is full. Further revisions will be compacted.");
                     }
                     blocking = true;
                 } else {
@@ -346,11 +362,24 @@ class ChangeProcessor implements FilteringAwareObserver {
                                 commitRateLimiter.unblockCommits();
                                 blocking = false;
                             }
+                        } else {
+                            blocking = false;
                         }
                     }
                 }
             }
 
+            private void logQueueFullWarning(String message) {
+                long currTime = clock.getTime();
+                if (lastQueueFullWarnTimestamp + QUEUE_FULL_WARN_INTERVAL < currTime) {
+                    LOG.warn("{} Suppressing further such cases for {} minutes.",
+                            message,
+                            TimeUnit.MILLISECONDS.toMinutes(QUEUE_FULL_WARN_INTERVAL));
+                    lastQueueFullWarnTimestamp = currTime;
+                } else {
+                    LOG.debug(message);
+                }
+            }
             
             @Override
             public String toString() {
@@ -602,6 +631,18 @@ class ChangeProcessor implements FilteringAwareObserver {
                 + ", eventDuration=" + eventDuration 
                 + ", commitRateLimiter=" + commitRateLimiter
                 + ", running=" + running.isSatisfied() + "]";
+    }
+    
+    /** for logging only **/
+    String getListenerToString() {
+        if (tracker == null) {
+            return "null";
+        }
+        EventListenerMBean listenerMBean = tracker.getListenerMBean();
+        if (listenerMBean == null) {
+            return "null (no listener mbean)";
+        }
+        return listenerMBean.getToString();
     }
 
     /**

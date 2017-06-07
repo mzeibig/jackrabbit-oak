@@ -19,6 +19,16 @@
 
 package org.apache.jackrabbit.oak.plugins.document;
 
+import static java.util.concurrent.Executors.newSingleThreadExecutor;
+import static java.util.concurrent.TimeUnit.HOURS;
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -36,6 +46,7 @@ import com.google.common.collect.Lists;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.plugins.document.VersionGarbageCollector.VersionGCStats;
 import org.apache.jackrabbit.oak.plugins.document.memory.MemoryDocumentStore;
+import org.apache.jackrabbit.oak.plugins.document.util.Utils;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
@@ -44,15 +55,7 @@ import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.stats.Clock;
 import org.junit.After;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Test;
-
-import static java.util.concurrent.Executors.newSingleThreadExecutor;
-import static java.util.concurrent.TimeUnit.HOURS;
-import static java.util.concurrent.TimeUnit.MINUTES;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.fail;
 
 public class VersionGCDeletionTest {
     private Clock clock;
@@ -62,6 +65,9 @@ public class VersionGCDeletionTest {
     @Before
     public void setUp() throws InterruptedException {
         clock = new Clock.Virtual();
+        // baseline the clock
+        clock.waitUntil(System.currentTimeMillis());
+        Revision.setClock(clock);
     }
 
     @After
@@ -80,9 +86,6 @@ public class VersionGCDeletionTest {
                 .setDocumentStore(ts)
                 .setAsyncDelay(0)
                 .getNodeStore();
-
-        //Baseline the clock
-        clock.waitUntil(Revision.getCurrentTimestamp());
 
         NodeBuilder b1 = store.getRoot().builder();
         b1.child("x").child("y");
@@ -120,6 +123,53 @@ public class VersionGCDeletionTest {
     }
 
     @Test
+    public void leaveResurrectedNodesAlone() throws Exception{
+        TestDocumentStore ts = new TestDocumentStore();
+        store = new DocumentMK.Builder()
+                .clock(clock)
+                .setDocumentStore(ts)
+                .setAsyncDelay(0)
+                .getNodeStore();
+
+        String id = Utils.getIdFromPath("/x");
+
+        NodeBuilder b1 = store.getRoot().builder();
+        b1.child("x");
+        store.merge(b1, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+
+        // Remove x
+        NodeBuilder b2 = store.getRoot().builder();
+        b2.child("x").remove();
+        store.merge(b2, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+        store.runBackgroundOperations();
+
+        NodeDocument d2 = ts.find(Collection.NODES, id, 0);
+        assertTrue(d2.wasDeletedOnce());
+
+        // Re-add x
+        NodeBuilder b3 = store.getRoot().builder();
+        b3.child("x");
+        store.merge(b3, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+        store.runBackgroundOperations();
+
+        NodeDocument d3 = ts.find(Collection.NODES, id, 0);
+        assertTrue(d3.wasDeletedOnce());
+
+        long maxAge = 1; //hours
+        long delta = TimeUnit.MINUTES.toMillis(10);
+
+        // 3. Check that resurrected doc does not get collected post maxAge
+        clock.waitUntil(clock.getTime() + HOURS.toMillis(maxAge * 2) + delta);
+        VersionGarbageCollector gc = store.getVersionGarbageCollector();
+
+        VersionGCStats stats = gc.gc(maxAge * 2, HOURS);
+        assertEquals(1, stats.updateResurrectedGCCount);
+        NodeDocument d4 = ts.find(Collection.NODES, id, 0);
+        assertNotNull(d4);
+        assertFalse(d4.wasDeletedOnce());
+    }
+
+    @Test
     public void deleteLargeNumber() throws Exception{
         int noOfDocsToDelete = 10000;
         DocumentStore ts = new MemoryDocumentStore();
@@ -128,9 +178,6 @@ public class VersionGCDeletionTest {
                 .setDocumentStore(new MemoryDocumentStore())
                 .setAsyncDelay(0)
                 .getNodeStore();
-
-        //Baseline the clock
-        clock.waitUntil(Revision.getCurrentTimestamp());
 
         NodeBuilder b1 = store.getRoot().builder();
         NodeBuilder xb = b1.child("x");
@@ -152,7 +199,7 @@ public class VersionGCDeletionTest {
         //3. Check that deleted doc does get collected post maxAge
         clock.waitUntil(clock.getTime() + HOURS.toMillis(maxAge*2) + delta);
         VersionGarbageCollector gc = store.getVersionGarbageCollector();
-        gc.setOverflowToDiskThreshold(100);
+        gc.setOptions(gc.getOptions().withOverflowToDiskThreshold(100));
 
         VersionGCStats stats = gc.gc(maxAge * 2, HOURS);
         assertEquals(noOfDocsToDelete * 2 + 1, stats.deletedDocGCCount);
@@ -177,9 +224,6 @@ public class VersionGCDeletionTest {
                 .setAsyncDelay(0)
                 .getNodeStore();
 
-        //Baseline the clock
-        clock.waitUntil(Revision.getCurrentTimestamp());
-
         NodeBuilder b1 = store.getRoot().builder();
         NodeBuilder xb = b1.child("x");
         for (int i = 0; i < noOfDocsToDelete - 1; i++){
@@ -201,7 +245,7 @@ public class VersionGCDeletionTest {
         //3. Check that deleted doc does get collected post maxAge
         clock.waitUntil(clock.getTime() + HOURS.toMillis(maxAge*2) + delta);
         VersionGarbageCollector gc = store.getVersionGarbageCollector();
-        gc.setOverflowToDiskThreshold(100);
+        gc.setOptions(gc.getOptions().withOverflowToDiskThreshold(100));
 
         VersionGCStats stats = gc.gc(maxAge * 2, HOURS);
         assertEquals(noOfDocsToDelete * 2 + 1, stats.deletedDocGCCount);
@@ -216,9 +260,6 @@ public class VersionGCDeletionTest {
                 .setDocumentStore(ts)
                 .setAsyncDelay(0)
                 .getNodeStore();
-
-        //Baseline the clock
-        clock.waitUntil(Revision.getCurrentTimestamp());
 
         NodeBuilder b1;
         NodeBuilder xb;
@@ -267,9 +308,6 @@ public class VersionGCDeletionTest {
     // OAK-2420
     @Test
     public void queryWhileDocsAreRemoved() throws Exception {
-        //Baseline the clock
-        clock.waitUntil(Revision.getCurrentTimestamp());
-
         final Thread currentThread = Thread.currentThread();
         final Semaphore queries = new Semaphore(0);
         final CountDownLatch ready = new CountDownLatch(1);

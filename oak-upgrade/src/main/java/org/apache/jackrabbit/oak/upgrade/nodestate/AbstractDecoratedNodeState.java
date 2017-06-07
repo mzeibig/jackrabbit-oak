@@ -24,7 +24,6 @@ import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState;
 import org.apache.jackrabbit.oak.plugins.memory.MemoryChildNodeEntry;
 import org.apache.jackrabbit.oak.plugins.memory.PropertyStates;
-import org.apache.jackrabbit.oak.plugins.tree.impl.TreeConstants;
 import org.apache.jackrabbit.oak.spi.state.AbstractNodeState;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
@@ -37,6 +36,7 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 
 import static com.google.common.base.Predicates.notNull;
 import static org.apache.jackrabbit.oak.plugins.tree.impl.TreeConstants.OAK_CHILD_ORDER;
@@ -63,6 +63,11 @@ public abstract class AbstractDecoratedNodeState extends AbstractNodeState {
 
     protected boolean hideProperty(@Nonnull final String name) {
         return false;
+    }
+
+    @Nonnull
+    protected Iterable<PropertyState> getNewPropertyStates() {
+        return Collections.emptyList();
     }
 
     @CheckForNull
@@ -150,7 +155,16 @@ public abstract class AbstractDecoratedNodeState extends AbstractNodeState {
     @Override
     @CheckForNull
     public PropertyState getProperty(@Nonnull String name) {
-        return decorate(delegate.getProperty(name));
+        PropertyState ps = decorate(delegate.getProperty(name));
+        if (ps == null) {
+            for (PropertyState p : getNewPropertyStates()) {
+                if (name.equals(p.getName())) {
+                    ps = p;
+                    break;
+                }
+            }
+        }
+        return ps;
     }
 
     @Override
@@ -166,7 +180,7 @@ public abstract class AbstractDecoratedNodeState extends AbstractNodeState {
                     }
                 }
         );
-        return Iterables.filter(propertyStates, notNull());
+        return Iterables.filter(Iterables.concat(propertyStates, getNewPropertyStates()), notNull());
     }
 
     /**

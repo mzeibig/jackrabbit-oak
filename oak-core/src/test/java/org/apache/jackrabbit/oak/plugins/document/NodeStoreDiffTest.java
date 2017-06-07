@@ -47,7 +47,7 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static org.apache.jackrabbit.oak.plugins.document.DocumentRootBuilder.UPDATE_LIMIT;
+import static org.apache.jackrabbit.oak.plugins.document.DocumentMK.UPDATE_LIMIT;
 import static org.hamcrest.CoreMatchers.hasItem;
 import static org.hamcrest.CoreMatchers.not;
 import static org.junit.Assert.assertFalse;
@@ -203,8 +203,6 @@ public class NodeStoreDiffTest {
 
     private void ops(){
         ns.runBackgroundOperations();
-        //Background ops are disabled for simple revisions
-        ns.backgroundWrite();
     }
 
     private NodeState createNodes(String... paths) throws CommitFailedException {

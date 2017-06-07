@@ -28,12 +28,17 @@ import java.io.IOException;
 import java.util.AbstractMap.SimpleImmutableEntry;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.UUID;
 
+import javax.annotation.Nullable;
+
+import com.google.common.base.Function;
+import com.google.common.collect.Iterators;
 import com.google.common.collect.Maps;
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.api.PropertyState;
@@ -44,6 +49,7 @@ import org.apache.jackrabbit.oak.segment.SegmentNodeState;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStateHelper;
 import org.apache.jackrabbit.oak.segment.SegmentPropertyState;
 import org.apache.jackrabbit.oak.segment.file.InvalidFileStoreVersionException;
+import org.apache.jackrabbit.oak.segment.file.JournalEntry;
 import org.apache.jackrabbit.oak.segment.file.JournalReader;
 import org.apache.jackrabbit.oak.segment.file.ReadOnlyFileStore;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
@@ -90,9 +96,17 @@ class SegmentTarExplorerBackend implements ExplorerBackend {
 
         try {
             journalReader = new JournalReader(journal);
-
+            Iterator<String> revisionIterator = Iterators.transform(journalReader,
+                    new Function<JournalEntry, String>() {
+                        @Nullable
+                        @Override
+                        public String apply(JournalEntry entry) {
+                            return entry.getRevision();
+                        }
+                    });
+            
             try {
-                revs = newArrayList(journalReader);
+                revs = newArrayList(revisionIterator);
             } finally {
                 journalReader.close();
             }
@@ -166,7 +180,7 @@ class SegmentTarExplorerBackend implements ExplorerBackend {
     public Set<UUID> getReferencedSegmentIds() {
         Set<UUID> ids = newHashSet();
 
-        for (SegmentId id : store.getTracker().getReferencedSegmentIds()) {
+        for (SegmentId id : store.getReferencedSegmentIds()) {
             ids.add(id.asUUID());
         }
 
@@ -180,7 +194,7 @@ class SegmentTarExplorerBackend implements ExplorerBackend {
 
     @Override
     public NodeState readNodeState(String recordId) {
-        return store.getReader().readNode(RecordId.fromString(store, recordId));
+        return store.getReader().readNode(RecordId.fromString(store.getSegmentIdProvider(), recordId));
     }
 
     @Override

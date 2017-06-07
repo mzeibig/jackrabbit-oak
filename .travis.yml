@@ -14,11 +14,20 @@
 # limitations under the License.
 
 sudo: false
-install:  mvn --batch-mode -DskipTests install -pl :oak-segment,:oak-segment-tar -am
-script:   mvn --batch-mode clean verify -PintegrationTesting -Dnsfixtures=DOCUMENT_NS -pl ':oak-lucene,!:oak-segment-tar,!:oak-segment' -am
+env:
+  - MODULE=oak-jcr
+  - MODULE=oak-core
+  - MODULE=oak-it
+  - MODULE=oak-lucene
+  - MODULE=oak-run
+  - MODULE=oak-it-osgi
+  - MODULE=oak-pojosr
+  - MODULE=oak-upgrade
+install:  mvn --batch-mode -DskipTests -Dbaseline.skip=true install -pl :${MODULE} -am -nsu
+script:   mvn --batch-mode clean verify -Dbaseline.skip=true -PintegrationTesting -Dnsfixtures=DOCUMENT_NS -pl :${MODULE} -nsu
 language: java
 jdk:
-  - oraclejdk7
+  - oraclejdk8
 cache:
   directories:
     - $HOME/.m2
@@ -28,6 +37,7 @@ addons:
       - mongodb-upstart
     packages:
       - mongodb-org-server
+      - oracle-java8-installer
 notifications:
   email: false
   webhooks:

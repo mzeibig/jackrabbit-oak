@@ -16,9 +16,10 @@
  */
 package org.apache.jackrabbit.oak.plugins.document;
 
-import java.util.Comparator;
-
+import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
+
+import org.apache.jackrabbit.oak.stats.Clock;
 
 /**
  * Provides revision related context.
@@ -52,4 +53,32 @@ public interface RevisionContext {
      */
     @Nonnull
     Revision newRevision();
+
+    /**
+     * @return the clock in use when a new revision is created.
+     */
+    @Nonnull
+    Clock getClock();
+
+    /**
+     * Retrieves the commit value for a given change. This method returns the
+     * following types of commit values:
+     * <ul>
+     *     <li>"c" : the change revision is committed as is.</li>
+     *     <li>"c-rX-Y-Z" : the change revision is a branch commit merged in
+     *          revision "rX-Y-Z".</li>
+     *     <li>"brX-Y-Z" : the change revision is a branch commit done at
+     *          "rX-Y-Z" but not yet merged.</li>
+     *     <li>{@code null} : the change revision does not have an entry on
+     *          the commit root document and is not committed.</li>
+     * </ul>
+     *
+     * @param changeRevision the revision a change was made.
+     * @param doc the document where the change was made.
+     * @return the commit value or {@code null} if the change does not
+     *          have a commit value (yet).
+     */
+    @CheckForNull
+    String getCommitValue(@Nonnull Revision changeRevision,
+                          @Nonnull NodeDocument doc);
 }

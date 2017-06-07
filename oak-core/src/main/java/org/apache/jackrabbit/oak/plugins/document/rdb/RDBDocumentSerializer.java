@@ -121,7 +121,7 @@ public class RDBDocumentSerializer {
                 sb.append("\"=\",");
             } else if (op.type == UpdateOp.Operation.Type.MAX) {
                 sb.append("\"M\",");
-            } else if (op.type == UpdateOp.Operation.Type.REMOVE_MAP_ENTRY) {
+            } else if (op.type == UpdateOp.Operation.Type.REMOVE || op.type == UpdateOp.Operation.Type.REMOVE_MAP_ENTRY) {
                 sb.append("\"*\",");
             } else {
                 throw new DocumentStoreException("Can't serialize " + update.toString() + " for JSON append");
@@ -160,11 +160,11 @@ public class RDBDocumentSerializer {
         if (RDBDocumentStore.USECMODCOUNT && row.getCollisionsModcount() != RDBRow.LONG_UNSET) {
             doc.put(CMODCOUNT, row.getCollisionsModcount());
         }
-        if (row.hasBinaryProperties()) {
-            doc.put(HASBINARY, NodeDocument.HAS_BINARY_VAL);
+        if (row.hasBinaryProperties() != null) {
+            doc.put(HASBINARY, row.hasBinaryProperties().longValue());
         }
-        if (row.deletedOnce()) {
-            doc.put(DELETEDONCE, Boolean.TRUE);
+        if (row.deletedOnce() != null) {
+            doc.put(DELETEDONCE, row.deletedOnce().booleanValue());
         }
 
         byte[] bdata = row.getBdata();
@@ -266,7 +266,7 @@ public class RDBDocumentSerializer {
             }
         } else if ("*".equals(opcode)) {
             if (rev == null) {
-                throw new DocumentStoreException("unexpected operation " + op + " in: " + updateString);
+                doc.remove(key);
             } else {
                 @SuppressWarnings("unchecked")
                 Map<Revision, Object> m = (Map<Revision, Object>) old;

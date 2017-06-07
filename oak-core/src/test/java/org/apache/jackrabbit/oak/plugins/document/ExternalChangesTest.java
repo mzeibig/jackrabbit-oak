@@ -57,7 +57,6 @@ import static org.hamcrest.collection.IsIterableContainingInAnyOrder.containsInA
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
@@ -102,10 +101,10 @@ public class ExternalChangesTest {
         b2.setProperty("foo2", "bar");
         ns1.merge(b2, newCollectingHook(), newCommitInfo());
 
-        ns1.backgroundWrite();
+        ns1.runBackgroundUpdateOperations();
 
         c2.reset();
-        ns2.backgroundRead();
+        ns2.runBackgroundReadOperations();
 
         CommitInfo ci = c2.getExternalChange();
         CommitContext cc = (CommitContext) ci.getInfo().get(CommitContext.NAME);
@@ -129,10 +128,10 @@ public class ExternalChangesTest {
         //Commit without ChangeSet
         ns1.merge(b2, EmptyHook.INSTANCE, CommitInfo.EMPTY);
 
-        ns1.backgroundWrite();
+        ns1.runBackgroundUpdateOperations();
 
         c2.reset();
-        ns2.backgroundRead();
+        ns2.runBackgroundReadOperations();
 
         CommitInfo ci = c2.getExternalChange();
         CommitContext cc = (CommitContext) ci.getInfo().get(CommitContext.NAME);
@@ -146,7 +145,7 @@ public class ExternalChangesTest {
 
     @Test
     public void changeSetForBranchCommit() throws Exception{
-        final int NUM_NODES = DocumentRootBuilder.UPDATE_LIMIT / 2;
+        final int NUM_NODES = DocumentMK.UPDATE_LIMIT / 2;
         final int NUM_PROPS = 10;
 
         Set<String> propNames = Sets.newHashSet();
@@ -162,10 +161,10 @@ public class ExternalChangesTest {
         }
 
         ns1.merge(b1, newCollectingHook(), newCommitInfo());
-        ns1.backgroundWrite();
+        ns1.runBackgroundUpdateOperations();
 
         c2.reset();
-        ns2.backgroundRead();
+        ns2.runBackgroundReadOperations();
 
         CommitInfo ci = c2.getExternalChange();
         CommitContext cc = (CommitContext) ci.getInfo().get(CommitContext.NAME);
@@ -184,7 +183,7 @@ public class ExternalChangesTest {
         NodeBuilder b0 = ns1.getRoot().builder();
         b0.child("0");
         ns1.merge(b0, newCollectingHook(), newCommitInfo());
-        ns1.backgroundWrite();
+        ns1.runBackgroundUpdateOperations();
 
         NodeBuilder b1 = ns1.getRoot().builder();
         b1.child("a");
@@ -203,10 +202,10 @@ public class ExternalChangesTest {
         b3.child("c");
         ns1.merge(b3, newCollectingHook(), newCommitInfo());
 
-        ns1.backgroundWrite();
+        ns1.runBackgroundUpdateOperations();
 
         c2.reset();
-        ns2.backgroundRead();
+        ns2.runBackgroundReadOperations();
 
         CommitInfo ci = c2.getExternalChange();
         cc = (CommitContext) ci.getInfo().get(CommitContext.NAME);

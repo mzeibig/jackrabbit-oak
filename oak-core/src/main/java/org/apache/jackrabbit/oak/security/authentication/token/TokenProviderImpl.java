@@ -18,6 +18,7 @@ package org.apache.jackrabbit.oak.security.authentication.token;
 
 import java.io.UnsupportedEncodingException;
 import java.security.NoSuchAlgorithmException;
+import java.security.Principal;
 import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -30,6 +31,7 @@ import java.util.Map;
 import java.util.UUID;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import javax.jcr.AccessDeniedException;
 import javax.jcr.Credentials;
 import javax.jcr.RepositoryException;
@@ -55,13 +57,13 @@ import org.apache.jackrabbit.oak.spi.security.authentication.token.TokenInfo;
 import org.apache.jackrabbit.oak.spi.security.authentication.token.TokenProvider;
 import org.apache.jackrabbit.oak.spi.security.user.UserConfiguration;
 import org.apache.jackrabbit.oak.spi.security.user.util.PasswordUtil;
-import org.apache.jackrabbit.oak.util.NodeUtil;
-import org.apache.jackrabbit.oak.util.TreeUtil;
+import org.apache.jackrabbit.oak.plugins.tree.TreeUtil;
 import org.apache.jackrabbit.util.ISO8601;
 import org.apache.jackrabbit.util.Text;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.jackrabbit.oak.api.Type.DATE;
 import static org.apache.jackrabbit.oak.api.Type.STRING;
 import static org.apache.jackrabbit.oak.plugins.identifier.IdentifierManager.getIdentifier;
 
@@ -146,7 +148,7 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
             return false;
         } else {
             Object attr = credentialsSupport.getAttributes(creds).get(TOKEN_ATTRIBUTE);
-            return (attr != null && "".equals(attr.toString()));
+            return (attr != null && attr.toString().isEmpty());
         }
     }
 
@@ -197,8 +199,8 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
     public TokenInfo createToken(@Nonnull String userId, @Nonnull Map<String, ?> attributes) {
         String error = "Failed to create login token. {}";
         User user = getUser(userId);
-        NodeUtil tokenParent = getTokenParent(user);
-        if (tokenParent != null && user != null) {
+        Tree tokenParent = (user == null) ? null : getTokenParent(user);
+        if (tokenParent != null) {
             try {
                 String id = user.getID();
                 long creationTime = new Date().getTime();
@@ -224,16 +226,11 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
                     root.commit(CommitMarker.asCommitAttributes());
                 }
                 return tokenInfo;
-            } catch (NoSuchAlgorithmException e) {
+            } catch (NoSuchAlgorithmException | UnsupportedEncodingException e) {
                 // error while generating login token
                 log.error(error, e.getMessage());
-            } catch (UnsupportedEncodingException e) {
-                // error while generating login token
-                log.error(error, e.getMessage());
-            } catch (CommitFailedException e) {
+            } catch (CommitFailedException | RepositoryException e) {
                 // conflict while committing changes
-                log.warn(error, e.getMessage());
-            } catch (RepositoryException e) {
                 log.warn(error, e.getMessage());
             }
         } else {
@@ -257,12 +254,18 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
         int pos = token.indexOf(DELIM);
         String nodeId = (pos == -1) ? token : token.substring(0, pos);
         Tree tokenTree = identifierManager.getTree(nodeId);
-        String userId = getUserId(tokenTree);
-        if (userId == null || !isValidTokenTree(tokenTree)) {
-            return null;
-        } else {
-            return new TokenInfoImpl(new NodeUtil(tokenTree), token, userId);
+        if (isValidTokenTree(tokenTree)) {
+            try {
+                User user = getUser(tokenTree);
+                if (user != null) {
+                    return new TokenInfoImpl(tokenTree, token, user.getID(), user.getPrincipal());
+                }
+            } catch (RepositoryException e) {
+                log.debug("Cannot determine userID/principal from token: {}", e.getMessage());
+            }
         }
+        // invalid token tree or failed to extract user or it's id/principal
+        return null;
     }
 
     //--------------------------------------------------------------------------
@@ -270,8 +273,14 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
         return creationTime + tokenExpiration;
     }
 
-    private static long getExpirationTime(NodeUtil tokenNode, long defaultValue) {
-        return tokenNode.getLong(TOKEN_ATTRIBUTE_EXPIRY, defaultValue);
+    private static long getExpirationTime(@Nonnull Tree tokenTree, long defaultValue) {
+        return TreeUtil.getLong(tokenTree, TOKEN_ATTRIBUTE_EXPIRY, defaultValue);
+    }
+
+    private static void setExpirationTime(@Nonnull Tree tree, long time) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.setTimeInMillis(time);
+        tree.setProperty(TOKEN_ATTRIBUTE_EXPIRY, ISO8601.format(calendar), DATE);
     }
 
     @CheckForNull
@@ -323,29 +332,20 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
         return Text.replace(ISO8601.format(creation), ":", ".");
     }
 
-    @CheckForNull
-    private Tree getTokenTree(@Nonnull TokenInfo tokenInfo) {
-        if (tokenInfo instanceof TokenInfoImpl) {
-            return root.getTree(((TokenInfoImpl) tokenInfo).tokenPath);
-        } else {
-            return null;
-        }
+    @Nonnull
+    private Tree getTokenTree(@Nonnull TokenInfoImpl tokenInfo) {
+        return root.getTree(tokenInfo.tokenPath);
     }
 
     @CheckForNull
-    private String getUserId(@CheckForNull Tree tokenTree) {
-        if (tokenTree != null && tokenTree.exists()) {
-            try {
-                String userPath = Text.getRelativeParent(tokenTree.getPath(), 2);
-                Authorizable authorizable = userManager.getAuthorizableByPath(userPath);
-                if (authorizable != null && !authorizable.isGroup() && !((User) authorizable).isDisabled()) {
-                    return authorizable.getID();
-                }
-            } catch (RepositoryException e) {
-                log.debug("Cannot determine userID from token: {}", e.getMessage());
-            }
+    private User getUser(@Nonnull Tree tokenTree) throws RepositoryException {
+        String userPath = Text.getRelativeParent(tokenTree.getPath(), 2);
+        Authorizable authorizable = userManager.getAuthorizableByPath(userPath);
+        if (authorizable != null && !authorizable.isGroup() && !((User) authorizable).isDisabled()) {
+            return (User) authorizable;
+        } else {
+            return null;
         }
-        return null;
     }
 
     @CheckForNull
@@ -365,18 +365,15 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
     }
 
     @CheckForNull
-    private NodeUtil getTokenParent(@CheckForNull User user) {
-        if (user == null) {
-            return null;
-        }
-        NodeUtil tokenParent = null;
+    private Tree getTokenParent(@Nonnull User user) {
+        Tree tokenParent = null;
         String parentPath = null;
         try {
             String userPath = user.getPath();
             parentPath = userPath + '/' + TOKENS_NODE_NAME;
 
-            NodeUtil userNode = new NodeUtil(root.getTree(userPath));
-            tokenParent = userNode.getOrAddChild(TOKENS_NODE_NAME, TOKENS_NT_NAME);
+            Tree userNode = root.getTree(userPath);
+            tokenParent = TreeUtil.getOrAddChild(userNode, TOKENS_NODE_NAME, TOKENS_NT_NAME);
 
             root.commit();
         } catch (RepositoryException e) {
@@ -389,7 +386,7 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
             root.refresh();
             Tree parentTree = root.getTree(parentPath);
             if (parentTree.exists()) {
-                tokenParent = new NodeUtil(parentTree);
+                tokenParent = parentTree;
             } else {
                 tokenParent = null;
             }
@@ -410,29 +407,29 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
      * new token node.
      *
      */
-    private TokenInfo createTokenNode(@Nonnull NodeUtil parent, @Nonnull String tokenName,
+    private TokenInfo createTokenNode(@Nonnull Tree parent, @Nonnull String tokenName,
                                       long expTime, @Nonnull String uuid,
                                       @Nonnull String id, Map<String, ?> attributes)
             throws AccessDeniedException, UnsupportedEncodingException, NoSuchAlgorithmException {
 
-        NodeUtil tokenNode = parent.addChild(tokenName, TOKEN_NT_NAME);
-        tokenNode.setString(JcrConstants.JCR_UUID, uuid);
+        Tree tokenNode = TreeUtil.addChild(parent, tokenName, TOKEN_NT_NAME);
+        tokenNode.setProperty(JcrConstants.JCR_UUID, uuid);
 
         String key = generateKey(options.getConfigValue(PARAM_TOKEN_LENGTH, DEFAULT_KEY_SIZE));
-        String nodeId = getIdentifier(tokenNode.getTree());
+        String nodeId = getIdentifier(tokenNode);
         String token = nodeId + DELIM + key;
 
         String keyHash = PasswordUtil.buildPasswordHash(getKeyValue(key, id), options);
-        tokenNode.setString(TOKEN_ATTRIBUTE_KEY, keyHash);
-        tokenNode.setDate(TOKEN_ATTRIBUTE_EXPIRY, expTime);
+        tokenNode.setProperty(TOKEN_ATTRIBUTE_KEY, keyHash);
+        setExpirationTime(tokenNode, expTime);
 
         for (String name : attributes.keySet()) {
             if (!RESERVED_ATTRIBUTES.contains(name)) {
                 String attr = attributes.get(name).toString();
-                tokenNode.setString(name, attr);
+                tokenNode.setProperty(name, attr);
             }
         }
-        return new TokenInfoImpl(tokenNode, token, id);
+        return new TokenInfoImpl(tokenNode, token, id, null);
     }
 
     //--------------------------------------------------------------------------
@@ -440,11 +437,12 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
     /**
      * TokenInfo
      */
-    private final class TokenInfoImpl implements TokenInfo {
+    final class TokenInfoImpl implements TokenInfo {
 
         private final String token;
         private final String tokenPath;
         private final String userId;
+        private final Principal principal;
 
         private final long expirationTime;
         private final String key;
@@ -452,18 +450,18 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
         private final Map<String, String> mandatoryAttributes;
         private final Map<String, String> publicAttributes;
 
-
-        private TokenInfoImpl(NodeUtil tokenNode, String token, String userId) {
+        private TokenInfoImpl(@Nonnull Tree tokenTree, @Nonnull String token, @Nonnull String userId, @Nullable Principal principal) {
             this.token = token;
-            this.tokenPath = tokenNode.getTree().getPath();
+            this.tokenPath = tokenTree.getPath();
             this.userId = userId;
+            this.principal = principal;
 
-            expirationTime = getExpirationTime(tokenNode, Long.MIN_VALUE);
-            key = tokenNode.getString(TOKEN_ATTRIBUTE_KEY, null);
+            expirationTime = getExpirationTime(tokenTree, Long.MIN_VALUE);
+            key = TreeUtil.getString(tokenTree, TOKEN_ATTRIBUTE_KEY);
 
-            mandatoryAttributes = new HashMap<String, String>();
-            publicAttributes = new HashMap<String, String>();
-            for (PropertyState propertyState : tokenNode.getTree().getProperties()) {
+            mandatoryAttributes = new HashMap();
+            publicAttributes = new HashMap();
+            for (PropertyState propertyState : tokenTree.getProperties()) {
                 String name = propertyState.getName();
                 String value = propertyState.getValue(STRING);
                 if (RESERVED_ATTRIBUTES.contains(name)) {
@@ -476,6 +474,11 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
                     publicAttributes.put(name, value);
                 } // else: jcr specific property
             }
+        }
+
+        @CheckForNull
+        Principal getPrincipal() {
+            return principal;
         }
 
         //------------------------------------------------------< TokenInfo >---
@@ -502,8 +505,7 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
             // for backwards compatibility use true as default value for the 'tokenRefresh' configuration
             if (options.getConfigValue(PARAM_TOKEN_REFRESH, true)) {
                 Tree tokenTree = getTokenTree(this);
-                if (tokenTree != null && tokenTree.exists()) {
-                    NodeUtil tokenNode = new NodeUtil(tokenTree);
+                if (tokenTree.exists()) {
                     if (isExpired(loginTime)) {
                         log.debug("Attempt to reset an expired token.");
                         return false;
@@ -512,7 +514,7 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
                     if (expirationTime - loginTime <= tokenExpiration / 2) {
                         try {
                             long expTime = createExpirationTime(loginTime, tokenExpiration);
-                            tokenNode.setDate(TOKEN_ATTRIBUTE_EXPIRY, expTime);
+                            setExpirationTime(tokenTree, expTime);
                             root.commit(CommitMarker.asCommitAttributes());
                             log.debug("Successfully reset token expiration time.");
                             return true;
@@ -529,7 +531,7 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
         @Override
         public boolean remove() {
             Tree tokenTree = getTokenTree(this);
-            if (tokenTree != null && tokenTree.exists()) {
+            if (tokenTree.exists()) {
                 try {
                     if (tokenTree.remove()) {
                         root.commit(CommitMarker.asCommitAttributes());
@@ -543,7 +545,7 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
         }
 
         @Override
-        public boolean matches(TokenCredentials tokenCredentials) {
+        public boolean matches(@Nonnull TokenCredentials tokenCredentials) {
             String tk = tokenCredentials.getToken();
             int pos = tk.lastIndexOf(DELIM);
             if (pos > -1) {
@@ -594,8 +596,8 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
          * @return {@code true} if the specified {@code attributeName}
          *         starts with or equals {@link #TOKEN_ATTRIBUTE}.
          */
-        private boolean isMandatoryAttribute(String attributeName) {
-            return attributeName != null && attributeName.startsWith(TOKEN_ATTRIBUTE);
+        private boolean isMandatoryAttribute(@Nonnull String attributeName) {
+            return attributeName.startsWith(TOKEN_ATTRIBUTE);
         }
 
         /**
@@ -608,7 +610,7 @@ class TokenProviderImpl implements TokenProvider, TokenConstants {
          * @return {@code true} if the specified property name doesn't seem
          *         to represent repository internal information.
          */
-        private boolean isInfoAttribute(String attributeName) {
+        private boolean isInfoAttribute(@Nonnull String attributeName) {
             String prefix = Text.getNamespacePrefix(attributeName);
             return !NamespaceConstants.RESERVED_PREFIXES.contains(prefix);
         }

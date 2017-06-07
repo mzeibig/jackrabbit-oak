@@ -32,6 +32,7 @@ import org.apache.commons.io.FileUtils;
 import org.apache.jackrabbit.oak.commons.IOUtils;
 
 import com.google.common.base.Stopwatch;
+import org.apache.jackrabbit.oak.run.commons.Command;
 
 class CompactCommand implements Command {
 
@@ -40,9 +41,13 @@ class CompactCommand implements Command {
         OptionParser parser = new OptionParser();
         OptionSpec<String> directoryArg = parser.nonOptions(
                 "Path to segment store (required)").ofType(String.class);
-        OptionSpec<Void> forceFlag = parser.accepts(
-                "force", "Force compaction and ignore non matching segment version");
-        OptionSpec segment = parser.accepts("segment", "Use oak-segment instead of oak-segment-tar");
+        OptionSpec<Boolean> mmapArg = parser.accepts("mmap",
+                "Use memory mapped access if true, use file access if false. " +
+                        "If not specified memory mapped access is used on 64 bit systems " +
+                        "and file access is used on 32 bit systems.")
+                .withOptionalArg()
+                .ofType(Boolean.class);
+
         OptionSet options = parser.parse(args);
 
         String path = directoryArg.value(options);
@@ -53,14 +58,21 @@ class CompactCommand implements Command {
         }
 
         File directory = new File(path);
-        boolean force = options.has(forceFlag);
 
         boolean success = false;
         Set<String> beforeLs = newHashSet();
         Set<String> afterLs = newHashSet();
         Stopwatch watch = Stopwatch.createStarted();
 
+        Boolean mmap = mmapArg.value(options);
         System.out.println("Compacting " + directory);
+        if (mmap == null) {
+            System.out.println("With default access mode");
+        } else if (mmap) {
+            System.out.println("With memory mapped access");
+        } else {
+            System.out.println("With file access");
+        }
         System.out.println("    before ");
         beforeLs.addAll(list(directory));
         long sizeBefore = FileUtils.sizeOfDirectory(directory);
@@ -70,11 +82,7 @@ class CompactCommand implements Command {
         System.out.println("    -> compacting");
 
         try {
-            if (options.has(segment)) {
-                SegmentUtils.compact(directory, force);
-            } else {
-                SegmentTarUtils.compact(directory, force);
-            }
+            SegmentTarUtils.compact(directory, mmap);
             success = true;
         } catch (Throwable e) {
             System.out.println("Compaction failure stack trace:");

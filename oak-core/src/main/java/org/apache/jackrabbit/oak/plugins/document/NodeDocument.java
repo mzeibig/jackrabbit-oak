@@ -79,7 +79,7 @@ import static org.apache.jackrabbit.oak.plugins.document.util.Utils.resolveCommi
 /**
  * A document storing data about a node.
  */
-public final class NodeDocument extends Document implements CachedNodeDocument{
+public final class NodeDocument extends Document {
 
     /**
      * Marker document, which indicates the document does not exist.
@@ -172,12 +172,13 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
     private static final String DELETED = "_deleted";
 
     /**
-     * Flag indicating that whether this node was ever deleted.
-     * Its just used as a hint. If set to true then it indicates that
-     * node was once deleted.
-     *
-     * <p>Note that a true value does not mean that node should be considered
-     * deleted as it might have been resurrected in later revision</p>
+     * Flag indicating that whether this node was ever deleted. Its just used as
+     * a hint. If set to true then it indicates that node was once deleted.
+     * <p>
+     * Note that a true value does not mean that node should be considered
+     * deleted as it might have been resurrected in later revision. Further note
+     * that it might get reset by maintenance tasks once they discover that it
+     * indeed was resurrected.
      */
     public static final String DELETED_ONCE = "_deletedOnce";
 
@@ -223,6 +224,19 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
      * during the next split run.
      */
     private static final String STALE_PREV = "_stalePrev";
+
+    /**
+     * Contains revision entries for changes done by branch commits.
+     */
+    private static final String BRANCH_COMMITS = "_bc";
+
+    /**
+     * The revision set by the background document sweeper. The revision
+     * indicates up to which revision documents have been cleaned by the sweeper
+     * and all previous non-branch revisions by this cluster node can be
+     * considered committed.
+     */
+    private static final String SWEEP_REV = "_sweepRev";
 
     //~----------------------------< Split Document Types >
 
@@ -299,6 +313,11 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
          * A split document which does not contain REVISIONS history.
          */
         COMMIT_ROOT_ONLY(60),
+        /**
+         * A split document which contains all types of data, but no branch
+         * commits.
+         */
+        DEFAULT_NO_BRANCH(70),
         ;
 
         final int type;
@@ -374,7 +393,6 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
     /**
      * @return the system time this object was created.
      */
-    @Override
     public long getCreated() {
         return creationTime;
     }
@@ -459,21 +477,8 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
      *
      * @param checkTime time at which the check was performed
      */
-    @Override
     public void markUpToDate(long checkTime) {
         lastCheckTime.set(checkTime);
-    }
-
-    /**
-     * Returns true if the document has already been checked for consistency
-     * in current cycle.
-     *
-     * @param lastCheckTime time at which current cycle started
-     * @return if the document was checked
-     */
-    @Override
-    public boolean isUpToDate(long lastCheckTime) {
-        return lastCheckTime <= this.lastCheckTime.get();
     }
 
     /**
@@ -481,7 +486,6 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
      *
      * @return the last check time
      */
-    @Override
     public long getLastCheckTime() {
         return lastCheckTime.get();
     }
@@ -528,55 +532,11 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
     }
 
     /**
-     * Returns <code>true</code> if the given <code>revision</code> is marked
-     * committed.
-     *
-     * @param revision the revision.
-     * @return <code>true</code> if committed; <code>false</code> otherwise.
-     */
-    public boolean isCommitted(@Nonnull Revision revision) {
-        NodeDocument commitRootDoc = getCommitRoot(checkNotNull(revision));
-        if (commitRootDoc == null) {
-            return false;
-        }
-        String value = commitRootDoc.getLocalRevisions().get(revision);
-        if (value != null) {
-            return Utils.isCommitted(value);
-        }
-        // check previous docs
-        for (NodeDocument prev : commitRootDoc.getPreviousDocs(REVISIONS, revision)) {
-            if (prev.containsRevision(revision)) {
-                return prev.isCommitted(revision);
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Returns the commit revision for the change with the given revision.
-     *
-     * @param revision the revision of a change.
-     * @return the commit revision of the change or {@code null} if the change
-     *          is not committed or unknown.
-     */
-    @CheckForNull
-    public Revision getCommitRevision(@Nonnull Revision revision) {
-        NodeDocument commitRoot = getCommitRoot(checkNotNull(revision));
-        if (commitRoot == null) {
-            return null;
-        }
-        String value = commitRoot.getCommitValue(revision);
-        if (Utils.isCommitted(value)) {
-            return Utils.resolveCommitRevision(revision, value);
-        }
-        return null;
-    }
-
-    /**
      * Returns <code>true</code> if this document contains an entry for the
      * given <code>revision</code> in the {@link #REVISIONS} map. Please note
      * that an entry in the {@link #REVISIONS} map does not necessarily mean
-     * the the revision is committed. Use {@link #isCommitted(Revision)} to get
+     * the the revision is committed.
+     * Use {@link RevisionContext#getCommitValue(Revision, NodeDocument)} to get
      * the commit state of a revision.
      *
      * @param revision the revision to check.
@@ -836,10 +796,10 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
                     // 5) changeRev is not on a branch, 'r' is committed and
                     //    newer than baseRev -> newestRev
 
-                    NodeDocument commitRoot = getCommitRoot(r);
                     Revision commitRevision = null;
-                    if (commitRoot != null) {
-                        commitRevision = commitRoot.getCommitRevision(r);
+                    String cv = context.getCommitValue(r, this);
+                    if (Utils.isCommitted(cv)) {
+                        commitRevision = resolveCommitRevision(r, cv);
                     }
                     if (commitRevision != null // committed but not yet visible
                             && head.isRevisionNewer(commitRevision)) {
@@ -909,19 +869,27 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
      * @return <code>true</code> if the revision is valid; <code>false</code>
      *         otherwise.
      */
-    boolean isValidRevision(@Nonnull RevisionContext context,
-                            @Nonnull Revision rev,
-                            @Nullable String commitValue,
-                            @Nonnull RevisionVector readRevision,
-                            @Nonnull Map<Revision, String> validRevisions) {
+    private boolean isValidRevision(@Nonnull RevisionContext context,
+                                    @Nonnull Revision rev,
+                                    @Nullable String commitValue,
+                                    @Nonnull RevisionVector readRevision,
+                                    @Nonnull Map<Revision, String> validRevisions) {
         if (validRevisions.containsKey(rev)) {
             return true;
         }
+        if (Utils.isCommitted(commitValue) && !readRevision.isBranch()) {
+            // no need to load commit root document, we can simply
+            // tell by looking at the commit revision whether the
+            // revision is valid/visible
+            Revision commitRev = Utils.resolveCommitRevision(rev, commitValue);
+            return !readRevision.isRevisionNewer(commitRev);
+        }
+
         NodeDocument doc = getCommitRoot(rev);
         if (doc == null) {
             return false;
         }
-        if (doc.isCommitted(context, rev, commitValue, readRevision)) {
+        if (doc.isVisible(context, rev, commitValue, readRevision)) {
             validRevisions.put(rev, commitValue);
             return true;
         }
@@ -948,7 +916,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
         Map<Revision, String> validRevisions = Maps.newHashMap();
         Branch branch = nodeStore.getBranches().getBranch(readRevision);
         LastRevs lastRevs = createLastRevs(readRevision,
-                validRevisions, branch, lastModified);
+                nodeStore, branch, lastModified);
 
         Revision min = getLiveRevision(nodeStore, readRevision, validRevisions, lastRevs);
         if (min == null) {
@@ -973,7 +941,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             // check if there may be more recent values in a previous document
             if (value != null
                     && !getPreviousRanges().isEmpty()
-                    && !isMostRecentCommitted(local, value.revision)) {
+                    && !isMostRecentCommitted(local, value.revision, nodeStore)) {
                 // not reading the most recent value, we may need to
                 // consider previous documents as well
                 for (Revision prev : getPreviousRanges().keySet()) {
@@ -1048,7 +1016,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
         }
 
         if (store instanceof RevisionListener) {
-            ((RevisionListener) store).updateAccessedRevision(lastRevision);
+            ((RevisionListener) store).updateAccessedRevision(lastRevision, nodeStore.getClusterId());
         }
 
         return new DocumentNodeState(nodeStore, path, readRevision, props, hasChildren(), lastRevision);
@@ -1720,6 +1688,51 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
         return getLocalMap(STALE_PREV);
     }
 
+    /**
+     * Returns the branch commit entries on this document
+     * ({@link #BRANCH_COMMITS}). This method does not consider previous
+     * documents, but only returns the entries on this document.
+     */
+    @Nonnull
+    public Set<Revision> getLocalBranchCommits() {
+        return getLocalMap(BRANCH_COMMITS).keySet();
+    }
+
+    /**
+     * Resolves the commit value for the change with the given revision on this
+     * document. If necessary, this method will lookup the commit value on the
+     * referenced commit root document.
+     *
+     * @param revision the revision of a change on this document.
+     * @return the commit value associated with the change.
+     */
+    @CheckForNull
+    String resolveCommitValue(Revision revision) {
+        NodeDocument commitRoot = getCommitRoot(revision);
+        if (commitRoot == null) {
+            return null;
+        }
+        return commitRoot.getCommitValue(revision);
+    }
+
+    /**
+     * Returns the sweep revisions on this document as a {@link RevisionVector}.
+     * This method will return an empty {@link RevisionVector} if this document
+     * doesn't have any sweep revisions set.
+     *
+     * @return the sweep revisions as a {@link RevisionVector}.
+     */
+    @Nonnull
+    RevisionVector getSweepRevisions() {
+        return new RevisionVector(transform(getLocalMap(SWEEP_REV).values(),
+                new Function<String, Revision>() {
+                    @Override
+                    public Revision apply(String s) {
+                        return Revision.fromString(s);
+                    }
+                }));
+    }
+
     //-------------------------< UpdateOp modifiers >---------------------------
 
     public static void setChildrenFlag(@Nonnull UpdateOp op,
@@ -1855,6 +1868,24 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
         checkNotNull(op).set(HAS_BINARY_FLAG, HAS_BINARY_VAL);
     }
 
+    public static void setBranchCommit(@Nonnull UpdateOp op,
+                                       @Nonnull Revision revision) {
+        checkNotNull(op).setMapEntry(BRANCH_COMMITS,
+                revision, String.valueOf(true));
+    }
+
+    public static void removeBranchCommit(@Nonnull UpdateOp op,
+                                          @Nonnull Revision revision) {
+        checkNotNull(op).removeMapEntry(BRANCH_COMMITS, revision);
+    }
+
+    public static void setSweepRevision(@Nonnull UpdateOp op,
+                                        @Nonnull Revision revision) {
+        checkNotNull(op).setMapEntry(SWEEP_REV,
+                new Revision(0, 0, revision.getClusterId()),
+                revision.toString());
+    }
+
     //----------------------------< internal >----------------------------------
 
     private void previousDocumentNotFound(String prevId, Revision rev) {
@@ -1884,7 +1915,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
     }
 
     private LastRevs createLastRevs(@Nonnull RevisionVector readRevision,
-                                    @Nonnull Map<Revision, String> validRevisions,
+                                    @Nonnull RevisionContext context,
                                     @Nullable Branch branch,
                                     @Nullable Revision pendingLastRev) {
         LastRevs lastRevs = new LastRevs(getLastRev(), readRevision, branch);
@@ -1906,10 +1937,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
                 // already found most recent change from this cluster node
                 continue;
             }
-            String commitValue = validRevisions.get(r);
-            if (commitValue == null) {
-                commitValue = resolveCommitValue(r);
-            }
+            String commitValue = context.getCommitValue(r, this);
             if (commitValue == null) {
                 continue;
             }
@@ -1929,14 +1957,6 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
         return lastRevs;
     }
 
-    private String resolveCommitValue(Revision revision) {
-        NodeDocument commitRoot = getCommitRoot(revision);
-        if (commitRoot == null) {
-            return null;
-        }
-        return commitRoot.getCommitValue(revision);
-    }
-
     /**
      * Returns {@code true} if the given {@code revision} is more recent or
      * equal to the committed revision in {@code valueMap}. This method assumes
@@ -1944,11 +1964,13 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
      *
      * @param valueMap the value map sorted most recent first.
      * @param revision a committed revision.
+     * @param context the revision context.
      * @return if {@code revision} is the most recent committed revision in the
      *          {@code valueMap}.
      */
     private boolean isMostRecentCommitted(SortedMap<Revision, String> valueMap,
-                                          Revision revision) {
+                                          Revision revision,
+                                          RevisionContext context) {
         if (valueMap.isEmpty()) {
             return true;
         }
@@ -1959,8 +1981,9 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
         }
         // need to check commit status
         for (Revision r : valueMap.keySet()) {
-            Revision c = getCommitRevision(r);
-            if (c != null) {
+            String cv = context.getCommitValue(r, this);
+            if (Utils.isCommitted(cv)) {
+                Revision c = resolveCommitRevision(r, cv);
                 return c.compareRevisionTimeThenClusterId(revision) <= 0;
             }
         }
@@ -2048,21 +2071,23 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
      * Returns <code>true</code> if the given revision
      * {@link Utils#isCommitted(String)} in the revisions map (including
      * revisions split off to previous documents) and is visible from the
-     * <code>readRevision</code>.
+     * <code>readRevision</code>. This includes branch commits if the read
+     * revision is on the same branch and is equal or newer than the revision
+     * to check.
      *
      * @param revision  the revision to check.
      * @param commitValue the commit value of the revision to check or
      *                    <code>null</code> if unknown.
      * @param readRevision the read revision.
-     * @return <code>true</code> if the revision is committed, otherwise
+     * @return <code>true</code> if the revision is visible, otherwise
      *         <code>false</code>.
      */
-    private boolean isCommitted(@Nonnull RevisionContext context,
-                                @Nonnull Revision revision,
-                                @Nullable String commitValue,
-                                @Nonnull RevisionVector readRevision) {
+    private boolean isVisible(@Nonnull RevisionContext context,
+                              @Nonnull Revision revision,
+                              @Nullable String commitValue,
+                              @Nonnull RevisionVector readRevision) {
         if (commitValue == null) {
-            commitValue = getCommitValue(revision);
+            commitValue = context.getCommitValue(revision, this);
         }
         if (commitValue == null) {
             return false;
@@ -2077,7 +2102,8 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
                 return !readRevision.isRevisionNewer(revision);
             } else {
                 // on same merged branch?
-                if (commitValue.equals(getCommitValue(readRevision.getBranchRevision().asTrunkRevision()))) {
+                Revision tr = readRevision.getBranchRevision().asTrunkRevision();
+                if (commitValue.equals(context.getCommitValue(tr, this))) {
                     // compare unresolved revision
                     return !readRevision.isRevisionNewer(revision);
                 }
@@ -2168,7 +2194,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             Revision propRev = entry.getKey();
             String commitValue = validRevisions.get(propRev);
             if (commitValue == null) {
-                commitValue = resolveCommitValue(propRev);
+                commitValue = context.getCommitValue(propRev, this);
             }
             if (commitValue == null) {
                 continue;
@@ -2189,7 +2215,6 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
         return null;
     }
 
-    @Override
     public String getPath() {
         String p = (String) get(PATH);
         if (p != null) {

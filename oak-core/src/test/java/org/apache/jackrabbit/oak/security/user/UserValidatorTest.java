@@ -111,7 +111,7 @@ public class UserValidatorTest extends AbstractSecurityTest implements UserConst
     public void createWithoutPrincipalName() throws Exception {
         try {
             User user = getUserManager(root).createUser("withoutPrincipalName", "pw");
-            Tree tree = root.getTree(userPath);
+            Tree tree = root.getTree(user.getPath());
             tree.removeProperty(REP_PRINCIPAL_NAME);
             root.commit();
 
@@ -127,7 +127,7 @@ public class UserValidatorTest extends AbstractSecurityTest implements UserConst
     public void createWithInvalidUUID() throws Exception {
         try {
             User user = getUserManager(root).createUser("withInvalidUUID", "pw");
-            Tree tree = root.getTree(userPath);
+            Tree tree = root.getTree(user.getPath());
             tree.setProperty(JcrConstants.JCR_UUID, UUID.randomUUID().toString());
             root.commit();
 
@@ -270,6 +270,7 @@ public class UserValidatorTest extends AbstractSecurityTest implements UserConst
         invalid.add(userPath);
         invalid.add(userPath + "/folder");
 
+        UserProvider up = new UserProvider(root, getUserConfiguration().getParameters());
         for (String path : invalid) {
             try {
                 Tree parent = root.getTree(path);
@@ -287,7 +288,7 @@ public class UserValidatorTest extends AbstractSecurityTest implements UserConst
                 }
                 Tree userTree = parent.addChild("testUser");
                 userTree.setProperty(JcrConstants.JCR_PRIMARYTYPE, NT_REP_USER, Type.NAME);
-                userTree.setProperty(JcrConstants.JCR_UUID, UserProvider.getContentID("testUser", false));
+                userTree.setProperty(JcrConstants.JCR_UUID, up.getContentID("testUser"));
                 userTree.setProperty(REP_PRINCIPAL_NAME, "testUser");
                 root.commit();
                 fail("Invalid hierarchy should be detected");
@@ -297,76 +298,6 @@ public class UserValidatorTest extends AbstractSecurityTest implements UserConst
             } finally {
                 root.refresh();
             }
-        }
-    }
-
-    
-    /**
-     * @since oak 1.0 cyclic group membership added in a single set of transient
-     *        modifications must be detected upon save.
-     */
-    @Test
-    public void testDetectCyclicMembership() throws Exception {
-        Group group1 = null;
-        Group group2 = null;
-        Group group3 = null;
-        
-        UserManager userMgr = getUserManager(root);
-        try {
-            group1 = userMgr.createGroup("group1");
-            group2 = userMgr.createGroup("group2");
-            group3 = userMgr.createGroup("group3");
-
-            group1.addMember(group2);
-            group2.addMember(group3);
-
-            // manually create the cyclic membership
-            Tree group3Tree = root.getTree(group3.getPath());
-            Set<String> values = Collections.singleton(root.getTree(group1.getPath()).getProperty(JcrConstants.JCR_UUID).getValue(Type.STRING));
-            PropertyState prop = PropertyStates.createProperty(REP_MEMBERS, values, Type.WEAKREFERENCES);
-            group3Tree.setProperty(prop);
-            root.commit();
-            fail("Cyclic group membership must be detected");
-        } catch (CommitFailedException e) {
-            // success
-        } finally {
-            if (group1 != null) group1.remove();
-            if (group2 != null) group2.remove();
-            if (group3 != null) group3.remove();
-            root.commit();
-        }
-    }
-
-    @Test
-    public void testDetectCyclicMembershipWithIntermediateCommit() throws Exception {
-        Group group1 = null;
-        Group group2 = null;
-        Group group3 = null;
-
-        UserManager userMgr = getUserManager(root);
-        try {
-            group1 = userMgr.createGroup("group1");
-            group2 = userMgr.createGroup("group2");
-            group3 = userMgr.createGroup("group3");
-
-            group1.addMember(group2);
-            group2.addMember(group3);
-            root.commit();
-
-            // manually create the cyclic membership
-            Tree group3Tree = root.getTree(group3.getPath());
-            Set<String> values = Collections.singleton(root.getTree(group1.getPath()).getProperty(JcrConstants.JCR_UUID).getValue(Type.STRING));
-            PropertyState prop = PropertyStates.createProperty(REP_MEMBERS, values, Type.WEAKREFERENCES);
-            group3Tree.setProperty(prop);
-            root.commit();
-            fail("Cyclic group membership must be detected");
-        } catch (CommitFailedException e) {
-            // success
-        } finally {
-            if (group1 != null) group1.remove();
-            if (group2 != null) group2.remove();
-            if (group3 != null) group3.remove();
-            root.commit();
         }
     }
 

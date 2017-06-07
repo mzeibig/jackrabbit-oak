@@ -22,8 +22,6 @@ import static com.google.common.base.Charsets.UTF_8;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkPositionIndexes;
 import static com.google.common.base.Preconditions.checkState;
-import static com.google.common.collect.Lists.newArrayList;
-import static com.google.common.collect.Lists.reverse;
 import static com.google.common.collect.Maps.newHashMap;
 import static com.google.common.collect.Maps.newLinkedHashMap;
 import static com.google.common.collect.Sets.newHashSet;
@@ -42,9 +40,11 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
 
 import com.google.common.base.Charsets;
+import com.google.common.base.Stopwatch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -161,33 +161,23 @@ class TarWriter implements Closeable {
      */
     private final Map<UUID, Set<UUID>> graph = newHashMap();
 
+    private final IOMonitor ioMonitor;
+
     /**
      * Used for maintenance operations (GC or recovery) via the TarReader and tests
      */
-    TarWriter(File file) {
+    TarWriter(File file, IOMonitor ioMonitor) {
         this.file = file;
         this.monitor = FileStoreMonitor.DEFAULT;
         this.writeIndex = -1;
+        this.ioMonitor = ioMonitor;
     }
 
-    TarWriter(File directory, FileStoreMonitor monitor, int writeIndex) {
-        this.file = new File(directory, format(FILE_NAME_FORMAT, writeIndex,
-                "a"));
+    TarWriter(File directory, FileStoreMonitor monitor, int writeIndex, IOMonitor ioMonitor) {
+        this.file = new File(directory, format(FILE_NAME_FORMAT, writeIndex, "a"));
         this.monitor = monitor;
         this.writeIndex = writeIndex;
-    }
-
-    /**
-     * Returns the number of segments written so far to this tar file.
-     *
-     * @return number of segments written so far
-     */
-    synchronized int count() {
-        return index.size();
-    }
-
-    synchronized Set<UUID> getUUIDs() {
-        return newHashSet(index.keySet());
+        this.ioMonitor = ioMonitor;
     }
 
     synchronized boolean containsEntry(long msb, long lsb) {
@@ -237,31 +227,39 @@ class TarWriter implements Closeable {
         return writeEntry(uuid, header, data, offset, size, generation);
     }
 
-    private synchronized long writeEntry(
-            UUID uuid, byte[] header, byte[] data, int offset, int size, int generation)
-            throws IOException {
+    private synchronized long writeEntry(UUID uuid, byte[] header, byte[] data, int offset, int size, int generation) throws IOException {
         checkState(!closed);
+
         if (access == null) {
             access = new RandomAccessFile(file, "rw");
             channel = access.getChannel();
         }
 
-        long initialLength = access.getFilePointer();
-        access.write(header);
-        access.write(data, offset, size);
+        long msb = uuid.getMostSignificantBits();
+        long lsb = uuid.getLeastSignificantBits();
+
         int padding = getPaddingSize(size);
+
+        long initialLength = access.getFilePointer();
+
+        access.write(header);
+
+        ioMonitor.beforeSegmentWrite(file, msb, lsb, size);
+        Stopwatch stopwatch = Stopwatch.createStarted();
+        access.write(data, offset, size);
+        ioMonitor.afterSegmentWrite(file, msb, lsb, size, stopwatch.elapsed(TimeUnit.NANOSECONDS));
+
         if (padding > 0) {
             access.write(ZERO_BYTES, 0, padding);
         }
 
         long currentLength = access.getFilePointer();
+        monitor.written(currentLength - initialLength);
+
         checkState(currentLength <= Integer.MAX_VALUE);
-        TarEntry entry = new TarEntry(
-                uuid.getMostSignificantBits(), uuid.getLeastSignificantBits(),
-                (int) (currentLength - size - padding), size, generation);
+        TarEntry entry = new TarEntry(msb, lsb, (int) (currentLength - size - padding), size, generation);
         index.put(uuid, entry);
 
-        monitor.written(currentLength - initialLength);
         return currentLength;
     }
 
@@ -375,7 +373,7 @@ class TarWriter implements Closeable {
         }
         close();
         int newIndex = writeIndex + 1;
-        return new TarWriter(file.getParentFile(), monitor, newIndex);
+        return new TarWriter(file.getParentFile(), monitor, newIndex, ioMonitor);
     }
 
     private void writeBinaryReferences() throws IOException {
@@ -628,27 +626,6 @@ class TarWriter implements Closeable {
                 header, 148, 8);
 
         return header;
-    }
-
-    /**
-     * Add all segment ids that are reachable from {@code referencedIds} via
-     * this writer's segment graph and subsequently remove those segment ids
-     * from {@code referencedIds} that are in this {@code TarWriter}. The
-     * latter can't be cleaned up anyway because they are not be present in
-     * any of the readers.
-     *
-     * @param referencedIds
-     * @throws IOException
-     */
-    synchronized void collectReferences(Set<UUID> referencedIds) {
-        for (UUID uuid : reverse(newArrayList(index.keySet()))) {
-            if (referencedIds.remove(uuid)) {
-                Set<UUID> refs = graph.get(uuid);
-                if (refs != null) {
-                    referencedIds.addAll(refs);
-                }
-            }
-        }
     }
 
     synchronized long fileLength() {

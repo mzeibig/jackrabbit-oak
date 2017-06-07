@@ -22,6 +22,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 
+import java.nio.ByteBuffer;
+
 import javax.annotation.Nonnull;
 
 import com.google.common.base.Supplier;
@@ -82,9 +84,15 @@ public class NodeRecordTest {
             SegmentNodeState three = writer.writeNode(two);
             writer.flush();
 
-            assertArrayEquals(three.getStableIdBytes(), two.getStableIdBytes());
-            assertArrayEquals(two.getStableIdBytes(), one.getStableIdBytes());
+            assertArrayEquals(asByteArray(three.getStableIdBytes()), asByteArray(two.getStableIdBytes()));
+            assertArrayEquals(asByteArray(two.getStableIdBytes()), asByteArray(one.getStableIdBytes()));
         }
+    }
+
+    private static final byte[] asByteArray(ByteBuffer bytes) {
+        byte[] buffer = new byte[RecordId.SERIALIZED_RECORD_ID_BYTES];
+        bytes.get(buffer);
+        return buffer;
     }
 
     @Test
@@ -162,27 +170,27 @@ public class NodeRecordTest {
         }
     }
 
-    private WriterCacheManager nodesOnlyCache() {
+    private static WriterCacheManager nodesOnlyCache() {
         return new WriterCacheManager() {
 
             WriterCacheManager defaultCache = new WriterCacheManager.Default();
 
             @Nonnull
             @Override
-            public RecordCache<String> getStringCache(int generation) {
-                return Empty.INSTANCE.getStringCache(generation);
+            public Cache<String, RecordId> getStringCache(int generation, Operation operation) {
+                return Empty.INSTANCE.getStringCache(generation, operation);
             }
 
             @Nonnull
             @Override
-            public RecordCache<Template> getTemplateCache(int generation) {
-                return Empty.INSTANCE.getTemplateCache(generation);
+            public Cache<Template, RecordId> getTemplateCache(int generation, Operation operation) {
+                return Empty.INSTANCE.getTemplateCache(generation, operation);
             }
 
             @Nonnull
             @Override
-            public NodeCache getNodeCache(int generation) {
-                return defaultCache.getNodeCache(generation);
+            public Cache<String, RecordId> getNodeCache(int generation, Operation operation) {
+                return defaultCache.getNodeCache(generation, operation);
             }
         };
     }

@@ -19,7 +19,6 @@
 
 package org.apache.jackrabbit.oak.plugins.document;
 
-import java.util.Collections;
 import java.util.Date;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -27,7 +26,7 @@ import java.util.Map.Entry;
 import javax.management.openmbean.OpenDataException;
 import javax.management.openmbean.TabularDataSupport;
 
-import org.apache.jackrabbit.oak.util.AbstractCheckpointMBean;
+import org.apache.jackrabbit.oak.commons.jmx.AbstractCheckpointMBean;
 
 import static org.apache.jackrabbit.oak.plugins.document.Checkpoints.Info;
 
@@ -53,6 +52,18 @@ public class DocumentCheckpointMBean extends AbstractCheckpointMBean {
             tab.put(id, toCompositeData(
                     id, created.toString(), expires.toString(), info.get()));
         }
+    }
+
+    @Override
+    public long getOldestCheckpointCreationTimestamp() {
+        Map<Revision, Info> checkpoints = store.getCheckpoints().getCheckpoints();
+
+        long minTimestamp = Long.MAX_VALUE;
+        for (Entry<Revision, Info> checkpoint : checkpoints.entrySet()) {
+            minTimestamp = Math.min(minTimestamp, checkpoint.getKey().getTimestamp());
+        }
+
+        return (minTimestamp==Long.MAX_VALUE)?0:minTimestamp;
     }
 
     @Override
