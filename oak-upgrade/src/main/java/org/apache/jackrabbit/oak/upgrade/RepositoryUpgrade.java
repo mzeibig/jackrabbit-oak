@@ -25,9 +25,7 @@ import static com.google.common.collect.Lists.newArrayListWithCapacity;
 import static com.google.common.collect.Maps.newHashMap;
 import static com.google.common.collect.Sets.newHashSet;
 import static com.google.common.collect.Sets.union;
-import static java.util.Collections.emptyMap;
 import static org.apache.jackrabbit.JcrConstants.JCR_SYSTEM;
-import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.REINDEX_PROPERTY_NAME;
 import static org.apache.jackrabbit.oak.plugins.name.Namespaces.addCustomMapping;
 import static org.apache.jackrabbit.oak.plugins.nodetype.NodeTypeConstants.NODE_TYPES_PATH;
 import static org.apache.jackrabbit.oak.spi.security.privilege.PrivilegeConstants.JCR_ALL;
@@ -41,7 +39,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.Calendar;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -68,7 +65,6 @@ import com.google.common.base.Stopwatch;
 import com.google.common.collect.HashBiMap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import org.apache.jackrabbit.api.security.authorization.PrivilegeManager;
 import org.apache.jackrabbit.core.IndexAccessor;
@@ -84,24 +80,21 @@ import org.apache.jackrabbit.core.query.lucene.FieldNames;
 import org.apache.jackrabbit.core.security.authorization.PrivilegeRegistry;
 import org.apache.jackrabbit.core.security.user.UserManagerImpl;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
-import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Root;
 import org.apache.jackrabbit.oak.api.Tree;
-import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.namepath.NamePathMapper;
 import org.apache.jackrabbit.oak.plugins.index.CompositeIndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.IndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.IndexUpdate;
 import org.apache.jackrabbit.oak.plugins.index.IndexUpdateCallback;
-import org.apache.jackrabbit.oak.plugins.index.IndexUtils;
 import org.apache.jackrabbit.oak.plugins.index.property.PropertyIndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.reference.ReferenceEditorProvider;
 import org.apache.jackrabbit.oak.plugins.name.NamespaceConstants;
 import org.apache.jackrabbit.oak.plugins.name.Namespaces;
 import org.apache.jackrabbit.oak.plugins.nodetype.TypeEditorProvider;
-import org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent;
+import org.apache.jackrabbit.oak.InitialContent;
 import org.apache.jackrabbit.oak.plugins.nodetype.write.ReadWriteNodeTypeManager;
-import org.apache.jackrabbit.oak.plugins.value.ValueFactoryImpl;
+import org.apache.jackrabbit.oak.plugins.value.jcr.ValueFactoryImpl;
 import org.apache.jackrabbit.oak.security.SecurityProviderImpl;
 import org.apache.jackrabbit.oak.spi.commit.CommitHook;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
@@ -157,11 +150,13 @@ public class RepositoryUpgrade {
 
     private static final int LOG_NODE_COPY = Integer.getInteger("oak.upgrade.logNodeCopy", 10000);
 
-    private static final Set<String> INDEXES_TO_REBUILD = ImmutableSet.of("counter", "uuid");
-
     public static final Set<String> DEFAULT_INCLUDE_PATHS = ALL;
 
     public static final Set<String> DEFAULT_EXCLUDE_PATHS = NONE;
+
+    public static final Set<String> DEFAULT_FRAGMENT_PATHS = NONE;
+
+    public static final Set<String> DEFAULT_EXCLUDE_FRAGMENTS = NONE;
 
     public static final Set<String> DEFAULT_MERGE_PATHS = NONE;
 
@@ -184,6 +179,16 @@ public class RepositoryUpgrade {
      * Paths to exclude during the copy process. Empty by default.
      */
     private Set<String> excludePaths = DEFAULT_EXCLUDE_PATHS;
+
+    /**
+     * Paths supporting fragments during the copy process. Empty by default.
+     */
+    private Set<String> fragmentPaths = DEFAULT_FRAGMENT_PATHS;
+
+    /**
+     * Fragments to exclude during the copy process. Empty by default.
+     */
+    private Set<String> excludeFragments = DEFAULT_EXCLUDE_FRAGMENTS;
 
     /**
      * Paths to merge during the copy process. Empty by default.
@@ -339,6 +344,25 @@ public class RepositoryUpgrade {
      */
     public void setExcludes(@Nonnull String... excludes) {
         this.excludePaths = copyOf(checkNotNull(excludes));
+    }
+
+    /**
+     * Sets the paths that should support the fragments.
+     *
+     * @param fragmentPaths Paths that should support fragments.
+     */
+    public void setFragmentPaths(@Nonnull String... fragmentPaths) {
+        this.fragmentPaths = copyOf(checkNotNull(fragmentPaths));
+    }
+
+    /**
+     * Sets the name fragments that should be excluded when the source repository
+     * is copied to the target repository.
+     *
+     * @param excludes Name fragments to be excluded from the copy.
+     */
+    public void setExcludeFragments(@Nonnull String... excludes) {
+        this.excludeFragments = copyOf(checkNotNull(excludes));
     }
 
     /**
@@ -546,8 +570,6 @@ public class RepositoryUpgrade {
                 hooks.addAll(customCommitHooks);
             }
 
-            markIndexesToBeRebuilt(targetBuilder);
-
             // type validation, reference and indexing hooks
             hooks.add(new EditorHook(new CompositeEditorProvider(
                 createTypeEditorProvider(),
@@ -559,21 +581,6 @@ public class RepositoryUpgrade {
             logger.debug("Repository upgrade completed.");
         } catch (Exception e) {
             throw new RepositoryException("Failed to copy content", e);
-        }
-    }
-
-    static void markIndexesToBeRebuilt(NodeBuilder targetRoot) {
-        NodeBuilder oakIndex = IndexUtils.getOrCreateOakIndex(targetRoot);
-        for (String indexName : INDEXES_TO_REBUILD) {
-            final NodeBuilder indexDef = oakIndex.getChildNode(indexName);
-            if (!indexDef.exists()) {
-                continue;
-            }
-            final PropertyState reindex = indexDef.getProperty(REINDEX_PROPERTY_NAME);
-            logger.info("Marking {} to be reindexed", indexName);
-            if (reindex == null || !reindex.getValue(Type.BOOLEAN)) {
-                indexDef.setProperty(REINDEX_PROPERTY_NAME, true);
-            }
         }
     }
 
@@ -957,6 +964,8 @@ public class RepositoryUpgrade {
         NodeStateCopier.builder()
                 .include(includes)
                 .exclude(excludes)
+                .supportFragment(fragmentPaths)
+                .excludeFragments(excludeFragments)
                 .merge(merges)
                 .copy(sourceRoot, targetRoot);
 
@@ -1022,10 +1031,6 @@ public class RepositoryUpgrade {
         private boolean started = false;
         private final boolean earlyShutdown;
         private final RepositoryContext source;
-
-        public LoggingCompositeHook(Collection<CommitHook> hooks) {
-          this(hooks, null, false);
-      }
 
         public LoggingCompositeHook(Collection<CommitHook> hooks,
                   RepositoryContext source, boolean earlyShutdown) {

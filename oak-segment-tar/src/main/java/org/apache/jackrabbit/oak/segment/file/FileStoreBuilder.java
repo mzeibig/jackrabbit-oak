@@ -350,7 +350,8 @@ public class FileStoreBuilder {
     @Nonnull
     public ReadOnlyFileStore buildReadOnly() throws InvalidFileStoreVersionException, IOException {
         checkState(!built, "Cannot re-use builder");
-        checkState(directory.exists() && directory.isDirectory());
+        checkState(directory.exists() && directory.isDirectory(),
+                "%s does not exist or is not a directory", directory);
         built = true;
         ReadOnlyRevisions revisions = new ReadOnlyRevisions(directory);
         LOG.info("Creating file store {}", this);
@@ -419,11 +420,19 @@ public class FileStoreBuilder {
         return snfeListener;
     }
 
+    /**
+     * @return  creates or returns the {@code WriterCacheManager} this builder passes or
+     *          passed to the store on {@link #build()}.
+     *
+     * @see #withNodeDeduplicationCacheSize(int)
+     * @see #withStringDeduplicationCacheSize(int)
+     * @see #withTemplateDeduplicationCacheSize(int)
+     */
     @Nonnull
-    WriterCacheManager getCacheManager() {
+    public WriterCacheManager getCacheManager() {
         if (cacheManager == null) {
-            cacheManager = new EvictingWriteCacheManager(
-                    stringDeduplicationCacheSize, templateDeduplicationCacheSize, nodeDeduplicationCacheSize);
+            cacheManager = new EvictingWriteCacheManager(stringDeduplicationCacheSize,
+                    templateDeduplicationCacheSize, nodeDeduplicationCacheSize, statsProvider);
         }
         return cacheManager;
     }
@@ -435,7 +444,8 @@ public class FileStoreBuilder {
     @Override
     public String toString() {
         return "FileStoreBuilder{" +
-                "directory=" + directory +
+                "version=" + getClass().getPackage().getImplementationVersion() +
+                ", directory=" + directory +
                 ", blobStore=" + blobStore +
                 ", maxFileSize=" + maxFileSize +
                 ", segmentCacheSize=" + segmentCacheSize +
@@ -450,10 +460,15 @@ public class FileStoreBuilder {
     }
 
     private static class EvictingWriteCacheManager extends WriterCacheManager.Default {
-        public EvictingWriteCacheManager(int stringCacheSize, int templateCacheSize, int nodeCacheSize) {
+        public EvictingWriteCacheManager(
+                int stringCacheSize,
+                int templateCacheSize,
+                int nodeCacheSize,
+                @Nonnull StatisticsProvider statisticsProvider) {
             super(RecordCache.factory(stringCacheSize, new StringCacheWeigher()),
                 RecordCache.factory(templateCacheSize, new TemplateCacheWeigher()),
-                PriorityCache.factory(nodeCacheSize, new NodeCacheWeigher()));
+                PriorityCache.factory(nodeCacheSize, new NodeCacheWeigher()),
+                statisticsProvider);
         }
 
         void evictOldGeneration(final int newGeneration) {

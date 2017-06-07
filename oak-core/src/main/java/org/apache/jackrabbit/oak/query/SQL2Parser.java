@@ -55,6 +55,7 @@ import org.apache.jackrabbit.oak.query.ast.SelectorImpl;
 import org.apache.jackrabbit.oak.query.ast.SourceImpl;
 import org.apache.jackrabbit.oak.query.ast.StaticOperandImpl;
 import org.apache.jackrabbit.oak.spi.query.PropertyValues;
+import org.apache.jackrabbit.oak.spi.query.QueryConstants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -210,8 +211,8 @@ public class SQL2Parser {
         boolean distinct = readIf("DISTINCT");
         ArrayList<ColumnOrWildcard> list = parseColumns();
         if (supportSQL1) {
-            addColumnIfNecessary(list, QueryImpl.JCR_PATH, QueryImpl.JCR_PATH);
-            addColumnIfNecessary(list, QueryImpl.JCR_SCORE, QueryImpl.JCR_SCORE);
+            addColumnIfNecessary(list, QueryConstants.JCR_PATH, QueryConstants.JCR_PATH);
+            addColumnIfNecessary(list, QueryConstants.JCR_SCORE, QueryConstants.JCR_SCORE);
         }
         read("FROM");
         SourceImpl source = parseSource();
@@ -1243,14 +1244,17 @@ public class SQL2Parser {
             readDecimal(i - 1, i);
             return;
         case CHAR_BRACKETED:
+            currentTokenQuoted = true;
             readString(i, ']');
             currentTokenType = IDENTIFIER;
             currentToken = currentValue.getValue(Type.STRING);
             return;
         case CHAR_STRING:
+            currentTokenQuoted = true;
             readString(i, '\'');
             return;
         case CHAR_QUOTED:
+            currentTokenQuoted = true;
             readString(i, '\"');
             if (supportSQL1) {
                 // for SQL-2, this is a literal, as defined in

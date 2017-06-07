@@ -35,7 +35,6 @@
   <description>Web application that hosts and serves a Jackrabbit Oak content repository</description>
 
   <properties>
-    <oak.version>1.8-SNAPSHOT</oak.version>
     <tomcat.version>7.0.40</tomcat.version>
     <tika.version>1.7</tika.version>
     <skip.deployment>true</skip.deployment>
@@ -84,17 +83,22 @@
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-jcr</artifactId>
-      <version>${oak.version}</version>
+      <version>${project.version}</version>
     </dependency>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-pojosr</artifactId>
-      <version>${oak.version}</version>
+      <version>${project.version}</version>
     </dependency>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-lucene</artifactId>
-      <version>${oak.version}</version>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>oak-store-composite</artifactId>
+      <version>${project.version}</version>
     </dependency>
     <dependency>
       <groupId>ch.qos.logback</groupId>
@@ -194,7 +198,7 @@
       <plugin>
          <groupId>org.eclipse.jetty</groupId>
          <artifactId>jetty-maven-plugin</artifactId>
-         <version>9.2.8.v20150217</version>
+         <version>9.4.3.v20170317</version>
          <configuration>
            <scanIntervalSeconds>0</scanIntervalSeconds>
            <connectors>
@@ -232,7 +236,7 @@
         <!-- add the jar created by maven-antrun-plugin in our artifacts -->
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>build-helper-maven-plugin</artifactId>
-        <version>1.9</version>
+        <version>3.0.0</version>
         <executions>
           <execution>
             <id>attach-artifacts</id>
@@ -276,7 +280,7 @@
       </plugin>
       <plugin>
         <artifactId>maven-clean-plugin</artifactId>
-        <version>2.5</version>
+        <version>3.0.0</version>
         <configuration>
           <filesets>
             <fileset>

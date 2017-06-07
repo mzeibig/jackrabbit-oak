@@ -17,18 +17,22 @@
 
 package org.apache.jackrabbit.oak.run;
 
-import static org.apache.jackrabbit.oak.plugins.segment.FileStoreHelper.isValidFileStoreOrFail;
+import static org.apache.jackrabbit.oak.segment.FileStoreHelper.isValidFileStoreOrFail;
 import static org.apache.jackrabbit.oak.segment.SegmentVersion.LATEST_VERSION;
 import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Set;
 
-import com.google.common.io.Closer;
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+
 import org.apache.jackrabbit.oak.plugins.blob.BlobReferenceRetriever;
 import org.apache.jackrabbit.oak.segment.SegmentBlobReferenceRetriever;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
@@ -50,6 +54,8 @@ import org.apache.jackrabbit.oak.segment.tool.Restore;
 import org.apache.jackrabbit.oak.segment.tool.Revisions;
 import org.apache.jackrabbit.oak.segment.tool.SegmentGraph;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
+
+import com.google.common.io.Closer;
 
 final class SegmentTarUtils {
 
@@ -184,22 +190,25 @@ final class SegmentTarUtils {
                 .run();
     }
 
-    static void check(File dir, String journalFileName, boolean fullTraversal, long debugLevel, long binLen, boolean ioStatistics) {
+    static void check(File dir, String journalFileName, long debugLevel, boolean checkBinaries, Set<String> filterPaths, boolean ioStatistics, 
+            PrintWriter outWriter, PrintWriter errWriter) {
         Check.builder()
                 .withPath(dir)
                 .withJournal(journalFileName)
-                .withFullTraversal(fullTraversal)
                 .withDebugInterval(debugLevel)
-                .withMinimumBinaryLength(binLen)
+                .withCheckBinaries(checkBinaries)
+                .withFilterPaths(filterPaths)
                 .withIOStatistics(ioStatistics)
+                .withOutWriter(outWriter)
+                .withErrWriter(errWriter)
                 .build()
                 .run();
     }
 
-    static void compact(File directory, boolean force) {
+    static void compact(@Nonnull File directory, @Nullable Boolean mmap) {
         Compact.builder()
                 .withPath(directory)
-                .withForce(force)
+                .withMmap(mmap)
                 .build()
                 .run();
     }
@@ -240,10 +249,11 @@ final class SegmentTarUtils {
         return fileStoreBuilder(new File(path)).build();
     }
 
-    private static ReadOnlyFileStore openReadOnlyFileStore(File path) throws IOException, InvalidFileStoreVersionException {
+    private static ReadOnlyFileStore openReadOnlyFileStore(File path, boolean memoryMapped)
+            throws IOException, InvalidFileStoreVersionException {
         return fileStoreBuilder(isValidFileStoreOrFail(path))
                 .withSegmentCacheSize(TAR_SEGMENT_CACHE_SIZE)
-                .withMemoryMapping(TAR_STORAGE_MEMORY_MAPPED)
+                .withMemoryMapping(memoryMapped)
                 .buildReadOnly();
     }
 
@@ -262,7 +272,7 @@ final class SegmentTarUtils {
         if (!directory.exists()) {
             return directory;
         }
-        ReadOnlyFileStore store = openReadOnlyFileStore(directory);
+        ReadOnlyFileStore store = openReadOnlyFileStore(directory, false);
         try {
             SegmentVersion segmentVersion = getSegmentVersion(store);
             if (segmentVersion != LATEST_VERSION) {

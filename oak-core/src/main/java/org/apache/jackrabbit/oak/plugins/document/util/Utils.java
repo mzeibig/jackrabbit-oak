@@ -23,6 +23,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +48,7 @@ import org.apache.jackrabbit.oak.plugins.document.NodeDocument;
 import org.apache.jackrabbit.oak.plugins.document.Revision;
 import org.apache.jackrabbit.oak.plugins.document.RevisionVector;
 import org.apache.jackrabbit.oak.plugins.document.StableRevisionComparator;
+import org.apache.jackrabbit.oak.stats.Clock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -307,7 +309,7 @@ public class Utils {
     
     public static boolean isIdFromLongPath(String id) {
         int index = id.indexOf(':');
-        return id.charAt(index + 1) == 'h';
+        return index != -1 && index < id.length() - 1 && id.charAt(index + 1) == 'h';
     }
 
     public static String getPathFromId(String id) {
@@ -567,6 +569,9 @@ public class Utils {
         return c.compare(a, b) <= 0 ? a : b;
     }
 
+    // default batch size for paging through a document store
+    private static final int DEFAULT_BATCH_SIZE = 100;
+
     /**
      * Returns an {@link Iterable} over all {@link NodeDocument}s in the given
      * store. The returned {@linkplain Iterable} does not guarantee a consistent
@@ -578,7 +583,7 @@ public class Utils {
      * @return an {@link Iterable} over all documents in the store.
      */
     public static Iterable<NodeDocument> getAllDocuments(final DocumentStore store) {
-        return internalGetSelectedDocuments(store, null, 0);
+        return internalGetSelectedDocuments(store, null, 0, DEFAULT_BATCH_SIZE);
     }
 
     /**
@@ -614,23 +619,35 @@ public class Utils {
      * @param indexedProperty the name of the indexed property.
      * @param startValue the lower bound value for the indexed property
      *                   (inclusive).
+     * @param batchSize number of documents to fetch at once
      * @return an {@link Iterable} over all documents in the store matching the
      *         condition
      */
     public static Iterable<NodeDocument> getSelectedDocuments(
+            DocumentStore store, String indexedProperty, long startValue, int batchSize) {
+        return internalGetSelectedDocuments(store, indexedProperty, startValue, batchSize);
+    }
+
+    /**
+     * Like {@link #getSelectedDocuments(DocumentStore, String, long, int)} with
+     * a default {@code batchSize}.
+     */
+    public static Iterable<NodeDocument> getSelectedDocuments(
             DocumentStore store, String indexedProperty, long startValue) {
-        return internalGetSelectedDocuments(store, indexedProperty, startValue);
+        return internalGetSelectedDocuments(store, indexedProperty, startValue, DEFAULT_BATCH_SIZE);
     }
 
     private static Iterable<NodeDocument> internalGetSelectedDocuments(
             final DocumentStore store, final String indexedProperty,
-            final long startValue) {
+            final long startValue, final int batchSize) {
+        if (batchSize < 2) {
+            throw new IllegalArgumentException("batchSize must be > 1");
+        }
         return new Iterable<NodeDocument>() {
             @Override
             public Iterator<NodeDocument> iterator() {
                 return new AbstractIterator<NodeDocument>() {
 
-                    private static final int BATCH_SIZE = 100;
                     private String startId = NodeDocument.MIN_ID_VALUE;
 
                     private Iterator<NodeDocument> batch = nextBatch();
@@ -655,8 +672,8 @@ public class Utils {
 
                     private Iterator<NodeDocument> nextBatch() {
                         List<NodeDocument> result = indexedProperty == null ? store.query(Collection.NODES, startId,
-                                NodeDocument.MAX_ID_VALUE, BATCH_SIZE) : store.query(Collection.NODES, startId,
-                                NodeDocument.MAX_ID_VALUE, indexedProperty, startValue, BATCH_SIZE);
+                                NodeDocument.MAX_ID_VALUE, batchSize) : store.query(Collection.NODES, startId,
+                                NodeDocument.MAX_ID_VALUE, indexedProperty, startValue, batchSize);
                         return result.iterator();
                     }
                 };
@@ -813,5 +830,67 @@ public class Utils {
                 };
             }
         };
+    }
+
+    /**
+     * Makes sure the current time is after the most recent external revision
+     * timestamp in the _lastRev map of the given root document. If necessary
+     * the current thread waits until {@code clock} is after the external
+     * revision timestamp.
+     *
+     * @param rootDoc the root document.
+     * @param clock the clock.
+     * @param clusterId the local clusterId.
+     * @throws InterruptedException if the current thread is interrupted while
+     *          waiting. The interrupted status on the current thread is cleared
+     *          when this exception is thrown.
+     */
+    public static void alignWithExternalRevisions(@Nonnull NodeDocument rootDoc,
+                                                  @Nonnull Clock clock,
+                                                  int clusterId)
+            throws InterruptedException {
+        Map<Integer, Revision> lastRevMap = checkNotNull(rootDoc).getLastRev();
+        long externalTime = Utils.getMaxExternalTimestamp(lastRevMap.values(), clusterId);
+        long localTime = clock.getTime();
+        if (localTime < externalTime) {
+            LOG.warn("Detected clock differences. Local time is '{}', " +
+                            "while most recent external time is '{}'. " +
+                            "Current _lastRev entries: {}",
+                    new Date(localTime), new Date(externalTime), lastRevMap.values());
+            double delay = ((double) externalTime - localTime) / 1000d;
+            String fmt = "Background read will be delayed by %.1f seconds. " +
+                    "Please check system time on cluster nodes.";
+            String msg = String.format(fmt, delay);
+            LOG.warn(msg);
+            while (localTime + 60000 < externalTime) {
+                clock.waitUntil(localTime + 60000);
+                localTime = clock.getTime();
+                delay = ((double) externalTime - localTime) / 1000d;
+                LOG.warn(String.format(fmt, delay));
+            }
+            clock.waitUntil(externalTime + 1);
+        } else if (localTime == externalTime) {
+            // make sure local time is past external time
+            // but only log at debug
+            LOG.debug("Local and external time are equal. Waiting until local" +
+                    "time is more recent than external reported time.");
+            clock.waitUntil(externalTime + 1);
+        }
+    }
+
+    /**
+     * Calls {@link Thread#join()} on each of the passed threads and catches
+     * any potentially thrown {@link InterruptedException}.
+     *
+     * @param threads the threads to join.
+     */
+    public static void joinQuietly(Thread... threads) {
+        for (Thread t : threads) {
+            try {
+                t.join();
+            } catch (InterruptedException e) {
+                // ignore
+            }
+        }
     }
 }

@@ -25,6 +25,7 @@ import static com.google.common.base.Throwables.propagate;
 import static com.google.common.base.Throwables.propagateIfInstanceOf;
 import static java.lang.Long.MAX_VALUE;
 import static java.util.concurrent.TimeUnit.DAYS;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreUtil.findPersistedRecordId;
 
 import java.io.Closeable;
 import java.io.File;
@@ -45,6 +46,7 @@ import com.google.common.base.Function;
 import com.google.common.base.Supplier;
 import org.apache.jackrabbit.oak.segment.RecordId;
 import org.apache.jackrabbit.oak.segment.Revisions;
+import org.apache.jackrabbit.oak.segment.SegmentIdProvider;
 import org.apache.jackrabbit.oak.segment.SegmentStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,7 +59,7 @@ import org.slf4j.LoggerFactory;
  * The {@link #setHead(Function, Option...)} method supports a timeout
  * {@link Option}, which can be retrieved through factory methods of this class.
  * <p>
- * Instance of this class must be {@link #bind(SegmentStore, Supplier) bound} to
+ * Instance of this class must be {@link #bind(SegmentStore, SegmentIdProvider, Supplier)} bound} to
  * a {@code SegmentStore} otherwise its method throw {@code IllegalStateException}s.
  */
 public class TarRevisions implements Revisions, Closeable {
@@ -154,36 +156,23 @@ public class TarRevisions implements Revisions, Closeable {
     /**
      * Bind this instance to a store.
      * @param store              store to bind to
+     * @param idProvider         {@code SegmentIdProvider} of the {@code store}
      * @param writeInitialNode   provider for the initial node in case the journal is empty.
      * @throws IOException
      */
     synchronized void bind(@Nonnull SegmentStore store,
+                           @Nonnull SegmentIdProvider idProvider,
                            @Nonnull Supplier<RecordId> writeInitialNode)
     throws IOException {
-        if (head.get() == null) {
-            RecordId persistedId = null;
-            try (JournalReader journalReader = new JournalReader(new File(directory, JOURNAL_FILE_NAME))) {
-                while (persistedId == null && journalReader.hasNext()) {
-                    String entry = journalReader.next();
-                    try {
-                        RecordId id = RecordId.fromString(store, entry);
-                        if (store.containsSegment(id.getSegmentId())) {
-                            persistedId = id;
-                        } else {
-                            LOG.warn("Unable to access revision {}, rewinding...", id);
-                        }
-                    } catch (IllegalArgumentException ignore) {
-                        LOG.warn("Skipping invalid record id {}", entry);
-                    }
-                }
-            }
-
-            if (persistedId == null) {
-                head.set(writeInitialNode.get());
-            } else {
-                persistedHead.set(persistedId);
-                head.set(persistedId);
-            }
+        if (head.get() != null) {
+            return;
+        }
+        RecordId persistedId = findPersistedRecordId(store, idProvider, new File(directory, JOURNAL_FILE_NAME));
+        if (persistedId == null) {
+            head.set(writeInitialNode.get());
+        } else {
+            persistedHead.set(persistedId);
+            head.set(persistedId);
         }
     }
 
@@ -285,7 +274,7 @@ public class TarRevisions implements Revisions, Closeable {
      * @see #INFINITY
      */
     @Override
-    public boolean setHead(
+    public RecordId setHead(
             @Nonnull Function<RecordId, RecordId> newHead,
             @Nonnull Option... options)
     throws InterruptedException {
@@ -296,15 +285,15 @@ public class TarRevisions implements Revisions, Closeable {
                 RecordId after = newHead.apply(getHead());
                 if (after != null) {
                     head.set(after);
-                    return true;
+                    return after;
                 } else {
-                    return false;
+                    return null;
                 }
             } finally {
                 rwLock.writeLock().unlock();
             }
         } else {
-            return false;
+            return null;
         }
     }
 

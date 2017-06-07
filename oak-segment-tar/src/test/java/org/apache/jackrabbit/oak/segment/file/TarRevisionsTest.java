@@ -24,6 +24,7 @@ import static java.util.concurrent.Executors.newFixedThreadPool;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -92,7 +93,7 @@ public class TarRevisionsTest {
     public void getHead() throws IOException {
         try (JournalReader reader = createJournalReader()) {
             assertTrue(reader.hasNext());
-            assertEquals(revisions.getHead().toString10(), reader.next());
+            assertEquals(revisions.getHead().toString10(), reader.next().getRevision());
         }
     }
 
@@ -112,7 +113,7 @@ public class TarRevisionsTest {
 
         try (JournalReader reader = createJournalReader()) {
             assertTrue(reader.hasNext());
-            assertEquals(newRoot.getRecordId().toString10(), reader.next());
+            assertEquals(newRoot.getRecordId().toString10(), reader.next().getRevision());
         }
     }
 
@@ -122,7 +123,7 @@ public class TarRevisionsTest {
         SegmentNodeState root = reader.readNode(headId);
 
         final SegmentNodeState newRoot = addChild(root, "a");
-        assertTrue(revisions.setHead(new Function<RecordId, RecordId>() {
+        assertNotNull(revisions.setHead(new Function<RecordId, RecordId>() {
             @Nullable
             @Override
             public RecordId apply(RecordId headId) {
@@ -133,7 +134,7 @@ public class TarRevisionsTest {
 
         try (JournalReader reader = createJournalReader()) {
             assertTrue(reader.hasNext());
-            assertEquals(newRoot.getRecordId().toString10(), reader.next());
+            assertEquals(newRoot.getRecordId().toString10(), reader.next().getRevision());
         }
     }
 
@@ -155,7 +156,7 @@ public class TarRevisionsTest {
             ListenableFuture<Boolean> t1 = executor.submit(new Callable<Boolean>() {
                 @Override
                 public Boolean call() throws Exception {
-                    return revisions.setHead(new Function<RecordId, RecordId>() {
+                    return null != revisions.setHead(new Function<RecordId, RecordId>() {
                         @Nullable
                         @Override
                         public RecordId apply(RecordId headId) {
@@ -167,7 +168,7 @@ public class TarRevisionsTest {
             ListenableFuture<Boolean> t2 = executor.submit(new Callable<Boolean>() {
                 @Override
                 public Boolean call() throws Exception {
-                    return revisions.setHead(new Function<RecordId, RecordId>() {
+                    return null != revisions.setHead(new Function<RecordId, RecordId>() {
                         @Nullable
                         @Override
                         public RecordId apply(RecordId headId) {
@@ -199,7 +200,7 @@ public class TarRevisionsTest {
                 @Override
                 public Boolean call() throws Exception {
                     latch.await();
-                    return revisions.setHead(Functions.<RecordId>identity());
+                    return null != revisions.setHead(Functions.<RecordId>identity());
                 }
             });
 
@@ -212,7 +213,7 @@ public class TarRevisionsTest {
                 @Override
                 public Boolean call() throws Exception {
                     latch.countDown();
-                    return revisions.setHead(Functions.<RecordId>identity());
+                    return null != revisions.setHead(Functions.<RecordId>identity());
                 }
             });
 

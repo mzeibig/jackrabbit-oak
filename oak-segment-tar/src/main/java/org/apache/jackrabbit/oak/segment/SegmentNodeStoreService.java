@@ -26,7 +26,7 @@ import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toInteger;
 import static org.apache.jackrabbit.oak.commons.PropertiesUtil.toLong;
 import static org.apache.jackrabbit.oak.osgi.OsgiUtil.lookupConfigurationThenFramework;
 import static org.apache.jackrabbit.oak.plugins.blob.datastore.SharedDataStoreUtils.isShared;
-import static org.apache.jackrabbit.oak.plugins.identifier.ClusterRepositoryInfo.getOrCreateId;
+import static org.apache.jackrabbit.oak.spi.cluster.ClusterRepositoryInfo.getOrCreateId;
 import static org.apache.jackrabbit.oak.segment.CachingSegmentReader.DEFAULT_STRING_CACHE_MB;
 import static org.apache.jackrabbit.oak.segment.CachingSegmentReader.DEFAULT_TEMPLATE_CACHE_MB;
 import static org.apache.jackrabbit.oak.segment.SegmentCache.DEFAULT_SEGMENT_CACHE_MB;
@@ -38,7 +38,6 @@ import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.COMPACTI
 import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.CUSTOM_BLOB_STORE;
 import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.DEFAULT_BLOB_GC_MAX_AGE;
 import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.DEFAULT_BLOB_SNAPSHOT_INTERVAL;
-import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.REPOSITORY_HOME_DIRECTORY;
 import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.GC_PROGRESS_LOG;
 import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.MEMORY_THRESHOLD;
 import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.MODE;
@@ -46,6 +45,7 @@ import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.NODE_DED
 import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.PAUSE_COMPACTION;
 import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.PROP_BLOB_GC_MAX_AGE;
 import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.PROP_BLOB_SNAPSHOT_INTERVAL;
+import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.REPOSITORY_HOME_DIRECTORY;
 import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.RETAINED_GENERATIONS;
 import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.SEGMENT_CACHE_SIZE;
 import static org.apache.jackrabbit.oak.segment.SegmentNodeStoreService.SIZE;
@@ -81,8 +81,6 @@ import java.util.concurrent.TimeUnit;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
-import com.google.common.base.Supplier;
-import com.google.common.io.Closer;
 import org.apache.felix.scr.annotations.Activate;
 import org.apache.felix.scr.annotations.Component;
 import org.apache.felix.scr.annotations.ConfigurationPolicy;
@@ -99,7 +97,7 @@ import org.apache.jackrabbit.oak.api.jmx.CheckpointMBean;
 import org.apache.jackrabbit.oak.api.jmx.FileStoreBackupRestoreMBean;
 import org.apache.jackrabbit.oak.backup.impl.FileStoreBackupRestoreImpl;
 import org.apache.jackrabbit.oak.cache.CacheStats;
-import org.apache.jackrabbit.oak.osgi.ObserverTracker;
+import org.apache.jackrabbit.oak.spi.commit.ObserverTracker;
 import org.apache.jackrabbit.oak.osgi.OsgiWhiteboard;
 import org.apache.jackrabbit.oak.plugins.blob.BlobGC;
 import org.apache.jackrabbit.oak.plugins.blob.BlobGCMBean;
@@ -109,7 +107,7 @@ import org.apache.jackrabbit.oak.plugins.blob.MarkSweepGarbageCollector;
 import org.apache.jackrabbit.oak.plugins.blob.SharedDataStore;
 import org.apache.jackrabbit.oak.plugins.blob.datastore.BlobIdTracker;
 import org.apache.jackrabbit.oak.plugins.blob.datastore.SharedDataStoreUtils.SharedStoreRecordType;
-import org.apache.jackrabbit.oak.plugins.identifier.ClusterRepositoryInfo;
+import org.apache.jackrabbit.oak.spi.cluster.ClusterRepositoryInfo;
 import org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions;
 import org.apache.jackrabbit.oak.segment.compaction.SegmentRevisionGC;
 import org.apache.jackrabbit.oak.segment.compaction.SegmentRevisionGCMBean;
@@ -118,6 +116,7 @@ import org.apache.jackrabbit.oak.segment.file.FileStoreBuilder;
 import org.apache.jackrabbit.oak.segment.file.FileStoreGCMonitor;
 import org.apache.jackrabbit.oak.segment.file.FileStoreStatsMBean;
 import org.apache.jackrabbit.oak.segment.file.InvalidFileStoreVersionException;
+import org.apache.jackrabbit.oak.segment.file.MetricsIOMonitor;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
 import org.apache.jackrabbit.oak.spi.gc.GCMonitor;
@@ -132,11 +131,14 @@ import org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardExecutor;
 import org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils;
 import org.apache.jackrabbit.oak.stats.Clock;
 import org.apache.jackrabbit.oak.stats.StatisticsProvider;
-import org.apache.jackrabbit.oak.util.GenericDescriptors;
+import org.apache.jackrabbit.oak.spi.descriptors.GenericDescriptors;
 import org.osgi.framework.Constants;
 import org.osgi.service.component.ComponentContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.google.common.base.Supplier;
+import com.google.common.io.Closer;
 
 /**
  * An OSGi wrapper for the segment node store.
@@ -310,8 +312,7 @@ public class SegmentNodeStoreService {
     @Property(boolValue = false,
             label = "Custom blob store",
             description = "Boolean value indicating that a custom BlobStore is used for storing " +
-                    "large binary values. " +
-                    "Default value is 'false'."
+                    "large binary values."
     )
     public static final String CUSTOM_BLOB_STORE = "customBlobStore";
 
@@ -449,6 +450,7 @@ public class SegmentNodeStoreService {
                 .withMaxFileSize(configuration.getMaxFileSize())
                 .withMemoryMapping(configuration.getMemoryMapping())
                 .withGCMonitor(gcMonitor)
+                .withIOMonitor(new MetricsIOMonitor(statisticsProvider))
                 .withStatisticsProvider(statisticsProvider)
                 .withGCOptions(gcOptions);
 
@@ -505,7 +507,8 @@ public class SegmentNodeStoreService {
                 templateCacheStats.getName()
         ));
 
-        CacheStatsMBean stringDeduplicationCacheStats = store.getStringDeduplicationCacheStats();
+        WriterCacheManager cacheManager = builder.getCacheManager();
+        CacheStatsMBean stringDeduplicationCacheStats = cacheManager.getStringCacheStats();
         if (stringDeduplicationCacheStats != null) {
             closeables.add(registrations.registerMBean(
                     CacheStatsMBean.class,
@@ -515,7 +518,7 @@ public class SegmentNodeStoreService {
             ));
         }
 
-        CacheStatsMBean templateDeduplicationCacheStats = store.getTemplateDeduplicationCacheStats();
+        CacheStatsMBean templateDeduplicationCacheStats = cacheManager.getTemplateCacheStats();
         if (templateDeduplicationCacheStats != null) {
             closeables.add(registrations.registerMBean(
                     CacheStatsMBean.class,
@@ -525,7 +528,7 @@ public class SegmentNodeStoreService {
             ));
         }
 
-        CacheStatsMBean nodeDeduplicationCacheStats = store.getNodeDeduplicationCacheStats();
+        CacheStatsMBean nodeDeduplicationCacheStats = cacheManager.getNodeCacheStats();
         if (nodeDeduplicationCacheStats != null) {
             closeables.add(registrations.registerMBean(
                     CacheStatsMBean.class,
@@ -543,12 +546,14 @@ public class SegmentNodeStoreService {
                     GCMonitor.class,
                     monitor
             ));
-            closeables.add(registrations.registerMBean(
-                    SegmentRevisionGC.class,
-                    new SegmentRevisionGCMBean(store, gcOptions, monitor),
-                    SegmentRevisionGC.TYPE,
-                    "Segment node store revision garbage collection"
-            ));
+            if (!configuration.isStandbyInstance()) {
+                closeables.add(registrations.registerMBean(
+                        SegmentRevisionGC.class,
+                        new SegmentRevisionGCMBean(store, gcOptions, monitor),
+                        SegmentRevisionGC.TYPE,
+                        "Segment node store revision garbage collection"
+                ));
+            }
             Runnable cancelGC = new Runnable() {
 
                 @Override

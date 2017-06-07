@@ -72,20 +72,9 @@ class JournalDiffLoader implements DiffCache.Loader {
         RevisionVector beforeRev = base.getRootRevision();
         stats = new Stats(path, beforeRev, afterRev);
 
-        JournalEntry localPending = ns.getCurrentJournalEntry();
-        DocumentStore store = ns.getDocumentStore();
-        NodeDocument root = Utils.getRootDocument(store);
-        Map<Integer, Revision> lastRevs = root.getLastRev();
-        int clusterId = ns.getClusterId();
-        Revision localLastRev = lastRevs.get(clusterId);
-        if (localLastRev == null) {
-            throw new IllegalStateException("Root document does not have a " +
-                    "lastRev entry for local clusterId " + clusterId);
-        }
-
         StringSort changes = JournalEntry.newSorter();
         try {
-            readTrunkChanges(path, beforeRev, afterRev, localPending, localLastRev, changes);
+            readTrunkChanges(path, beforeRev, afterRev, changes);
 
             readBranchChanges(path, beforeRev, changes);
             readBranchChanges(path, afterRev, changes);
@@ -135,9 +124,24 @@ class JournalDiffLoader implements DiffCache.Loader {
     private void readTrunkChanges(String path,
                                   RevisionVector beforeRev,
                                   RevisionVector afterRev,
-                                  JournalEntry localPending,
-                                  Revision localLastRev,
                                   StringSort changes) throws IOException {
+        JournalEntry localPending = ns.getCurrentJournalEntry();
+        DocumentStore store = ns.getDocumentStore();
+        NodeDocument root = Utils.getRootDocument(store);
+        int clusterId = ns.getClusterId();
+        Map<Integer, Revision> lastRevs = root.getLastRev();
+        Revision localLastRev;
+        if (clusterId == 0) {
+            // read-only node store
+            localLastRev = afterRev.getRevision(clusterId);
+        } else {
+            localLastRev = lastRevs.get(clusterId);
+        }
+        if (localLastRev == null) {
+            throw new IllegalStateException("Root document does not have a " +
+                    "lastRev entry for local clusterId " + clusterId);
+        }
+
         if (ns.isDisableBranches()) {
             beforeRev = beforeRev.asTrunkRevision();
             afterRev = afterRev.asTrunkRevision();
@@ -149,9 +153,17 @@ class JournalDiffLoader implements DiffCache.Loader {
             return;
         }
 
-        int clusterId = ns.getClusterId();
         RevisionVector max = beforeRev.pmax(afterRev);
         RevisionVector min = beforeRev.pmin(afterRev);
+
+        // do we need to include changes from pending local changes?
+        if (!max.isRevisionNewer(localLastRev)
+                && !localLastRev.equals(max.getRevision(clusterId))) {
+            // journal does not contain all local changes
+            localPending.addTo(changes, path);
+            stats.numJournalEntries++;
+        }
+
         for (Revision to : max) {
             Revision from = min.getRevision(to.getClusterId());
             if (from == null) {
@@ -159,14 +171,13 @@ class JournalDiffLoader implements DiffCache.Loader {
                 // use revision with a timestamp of zero
                 from = new Revision(0, 0, to.getClusterId());
             }
-            stats.numJournalEntries += fillExternalChanges(changes, path, from, to, ns.getDocumentStore(), null, null);
-        }
-        // do we need to include changes from pending local changes?
-        if (!max.isRevisionNewer(localLastRev)
-                && !localLastRev.equals(max.getRevision(clusterId))) {
-            // journal does not contain all local changes
-            localPending.addTo(changes, path);
-            stats.numJournalEntries++;
+            StringSort invalidateOnly = JournalEntry.newSorter();
+            try {
+                stats.numJournalEntries += fillExternalChanges(changes, invalidateOnly,
+                        path, from, to, ns.getDocumentStore(), null, null);
+            } finally {
+                invalidateOnly.close();
+            }
         }
     }
 

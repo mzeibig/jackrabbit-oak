@@ -117,7 +117,7 @@ public class SegmentNodeState extends Record implements NodeState {
      * @return  stable id
      */
     String getStableId() {
-        ByteBuffer buffer = ByteBuffer.wrap(getStableIdBytes());
+        ByteBuffer buffer = getStableIdBytes();
         long msb = buffer.getLong();
         long lsb = buffer.getLong();
         int offset = buffer.getInt();
@@ -132,7 +132,7 @@ public class SegmentNodeState extends Record implements NodeState {
      *
      * @return the stable ID of this node.
      */
-    byte[] getStableIdBytes() {
+    ByteBuffer getStableIdBytes() {
         // The first record id of this node points to the stable id.
         RecordId id = getSegment().readRecordId(getRecordNumber());
 
@@ -144,9 +144,7 @@ public class SegmentNodeState extends Record implements NodeState {
         } else {
             // Otherwise that id points to the serialised (msb, lsb, offset)
             // stable id.
-            byte[] buffer = new byte[RecordId.SERIALIZED_RECORD_ID_BYTES];
-            id.getSegment().readBytes(id.getRecordNumber(), buffer, 0, buffer.length);
-            return buffer;
+            return id.getSegment().readBytes(id.getRecordNumber(), 0, RecordId.SERIALIZED_RECORD_ID_BYTES);
         }
     }
 
@@ -623,8 +621,21 @@ public class SegmentNodeState extends Record implements NodeState {
     }
 
     //------------------------------------------------------------< Object >--
-
-    static boolean fastEquals(NodeState a, NodeState b) {
+    
+    /**
+     * Indicates whether two {@link NodeState} instances are equal to each
+     * other. A return value of {@code true} clearly means that the instances
+     * are equal, while a return value of {@code false} doesn't necessarily mean
+     * the instances are not equal. These "false negatives" are an
+     * implementation detail and callers cannot rely on them being stable.
+     * 
+     * @param a
+     *            the first {@link NodeState} instance
+     * @param b
+     *            the second {@link NodeState} instance
+     * @return {@code true}, if these two instances are equal.
+     */
+    public static boolean fastEquals(NodeState a, NodeState b) {
         if (Record.fastEquals(a, b)) {
             return true;
         }

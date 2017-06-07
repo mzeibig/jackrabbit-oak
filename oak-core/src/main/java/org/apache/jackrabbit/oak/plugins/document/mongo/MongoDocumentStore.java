@@ -78,7 +78,7 @@ import org.apache.jackrabbit.oak.plugins.document.locks.NodeDocumentLocks;
 import org.apache.jackrabbit.oak.plugins.document.locks.StripedNodeDocumentLocks;
 import org.apache.jackrabbit.oak.plugins.document.util.Utils;
 import org.apache.jackrabbit.oak.stats.Clock;
-import org.apache.jackrabbit.oak.util.PerfLogger;
+import org.apache.jackrabbit.oak.commons.benchmark.PerfLogger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -108,7 +108,12 @@ import static com.google.common.collect.Iterables.filter;
 import static com.google.common.collect.Maps.filterKeys;
 import static com.google.common.collect.Maps.filterValues;
 import static com.google.common.collect.Sets.difference;
+import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.DELETED_ONCE;
+import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.MODIFIED_IN_SECS;
+import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.SD_MAX_REV_TIME_IN_SECS;
+import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.SD_TYPE;
 import static org.apache.jackrabbit.oak.plugins.document.mongo.MongoUtils.createIndex;
+import static org.apache.jackrabbit.oak.plugins.document.mongo.MongoUtils.createPartialIndex;
 import static org.apache.jackrabbit.oak.plugins.document.mongo.MongoUtils.hasIndex;
 
 /**
@@ -149,7 +154,7 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
 
     private RevisionVector mostRecentAccessedRevisions;
 
-    final LocalChanges localChanges;
+    LocalChanges localChanges;
 
     private final long maxReplicationLagMillis;
 
@@ -249,18 +254,17 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
             localChanges = null;
         } else {
             replicaInfo = new ReplicaSetInfo(clock, db, builder.getMongoUri(), estimationPullFrequencyMS, maxReplicationLagMillis, builder.getExecutor());
-            Thread replicaInfoThread = new Thread(replicaInfo, "MongoDocumentStore replica set info provider (" + builder.getClusterId() + ")");
+            Thread replicaInfoThread = new Thread(replicaInfo, "MongoDocumentStore replica set info provider");
             replicaInfoThread.setDaemon(true);
             replicaInfoThread.start();
-            localChanges = new LocalChanges(builder.getClusterId());
-            replicaInfo.addListener(localChanges);
         }
 
         // indexes:
         // the _id field is the primary key, so we don't need to define it
 
+        long initialDocsCount = nodes.count();
         // compound index on _modified and _id
-        if (nodes.count() == 0) {
+        if (initialDocsCount == 0) {
             // this is an empty store, create a compound index
             // on _modified and _id (OAK-3071)
             createIndex(nodes, new String[]{NodeDocument.MODIFIED_IN_SECS, Document.ID},
@@ -276,10 +280,27 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
         createIndex(nodes, NodeDocument.HAS_BINARY_FLAG, true, false, true);
 
         // index on _deleted for fast lookup of potentially garbage
-        createIndex(nodes, NodeDocument.DELETED_ONCE, true, false, true);
+        // depending on the MongoDB version, create a partial index
+        if (mongoStatus.isVersion(3, 2)
+                && initialDocsCount == 0) {
+            createPartialIndex(nodes, new String[]{DELETED_ONCE, MODIFIED_IN_SECS},
+                    new boolean[]{true, true}, "{" + DELETED_ONCE + ":true}");
+        } else {
+            createIndex(nodes, NodeDocument.DELETED_ONCE, true, false, true);
+        }
 
-        // index on _sdType for fast lookup of split documents
-        createIndex(nodes, NodeDocument.SD_TYPE, true, false, true);
+        // compound index on _sdType and _sdMaxRevTime
+        if (initialDocsCount == 0) {
+            // this is an empty store, create compound index
+            // on _sdType and _sdMaxRevTime (OAK-6129)
+            createIndex(nodes, new String[]{SD_TYPE, SD_MAX_REV_TIME_IN_SECS},
+                    new boolean[]{true, true}, false, true);
+        } else if (!hasIndex(nodes, SD_TYPE, SD_MAX_REV_TIME_IN_SECS)) {
+            LOG.warn("Detected an upgrade from Oak version <= 1.6. For optimal " +
+                    "Revision GC performance it is recommended to create a " +
+                    "sparse compound index for the 'nodes' collection on " +
+                    "{_sdType:1, _sdMaxRevTime:1}.");
+        }
 
         // index on _modified for journal entries
         createIndex(journal, JournalEntry.MODIFIED, true, false, false);
@@ -646,14 +667,14 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
     public <T extends Document> void remove(Collection<T> collection, String key) {
         log("remove", key);
         DBCollection dbCollection = getDBCollection(collection);
-        long start = PERFLOG.start();
+        Stopwatch watch = startWatch();
         try {
             dbCollection.remove(getByKeyQuery(key).get());
         } catch (Exception e) {
             throw DocumentStoreException.convert(e, "Remove failed for " + key);
         } finally {
             invalidateCache(collection, key);
-            PERFLOG.end(start, 1, "remove key={}", key);
+            stats.doneRemove(watch.elapsed(TimeUnit.NANOSECONDS), collection, 1);
         }
     }
 
@@ -661,7 +682,7 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
     public <T extends Document> void remove(Collection<T> collection, List<String> keys) {
         log("remove", keys);
         DBCollection dbCollection = getDBCollection(collection);
-        long start = PERFLOG.start();
+        Stopwatch watch = startWatch();
         try {
             for(List<String> keyBatch : Lists.partition(keys, IN_CLAUSE_BATCH_SIZE)){
                 DBObject query = QueryBuilder.start(Document.ID).in(keyBatch).get();
@@ -678,7 +699,7 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
                 }
             }
         } finally {
-            PERFLOG.end(start, 1, "remove keys={}", keys);
+            stats.doneRemove(watch.elapsed(TimeUnit.NANOSECONDS), collection, keys.size());
         }
     }
 
@@ -688,7 +709,7 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
         log("remove", toRemove);
         int num = 0;
         DBCollection dbCollection = getDBCollection(collection);
-        long start = PERFLOG.start();
+        Stopwatch watch = startWatch();
         try {
             List<String> batchIds = Lists.newArrayList();
             List<DBObject> batch = Lists.newArrayList();
@@ -716,7 +737,7 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
                 }
             }
         } finally {
-            PERFLOG.end(start, 1, "remove keys={}", toRemove);
+            stats.doneRemove(watch.elapsed(TimeUnit.NANOSECONDS), collection, num);
         }
         return num;
     }
@@ -728,7 +749,7 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
         log("remove", collection, indexedProperty, startValue, endValue);
         int num = 0;
         DBCollection dbCollection = getDBCollection(collection);
-        long start = PERFLOG.start();
+        Stopwatch watch = startWatch();
         try {
             QueryBuilder queryBuilder = QueryBuilder.start(indexedProperty);
             queryBuilder.greaterThan(startValue);
@@ -749,7 +770,7 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
                 }
             }
         } finally {
-            PERFLOG.end(start, 1, "remove from {}: {} in ({}, {})", collection, indexedProperty, startValue, endValue);
+            stats.doneRemove(watch.elapsed(TimeUnit.NANOSECONDS), collection, num);
         }
         return num;
     }
@@ -1149,6 +1170,7 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
                         }
                         break;
                     }
+                    case REMOVE:
                     case REMOVE_MAP_ENTRY:
                         // nothing to do for new entries
                         break;
@@ -1325,12 +1347,14 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
                         NodeDocument cachedDoc = nodesCache.getIfPresent(parentId);
                         secondarySafe = cachedDoc != null && !cachedDoc.hasBeenModifiedSince(replicationSafeLimit);
                     }
-                } else {
+                } else if (localChanges != null) {
                     secondarySafe = true;
                     secondarySafe &= collection == Collection.NODES;
                     secondarySafe &= documentId == null || !localChanges.mayContain(documentId);
                     secondarySafe &= parentId == null || !localChanges.mayContainChildrenOf(parentId);
                     secondarySafe &= mostRecentAccessedRevisions == null || replicaInfo.isMoreRecentThan(mostRecentAccessedRevisions);
+                } else { // localChanges not initialized yet
+                    secondarySafe = false;
                 }
 
                 ReadPreference readPreference;
@@ -1528,6 +1552,7 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
                     incUpdates.append(k.toString(), op.value);
                     break;
                 }
+                case REMOVE:
                 case REMOVE_MAP_ENTRY: {
                     unsetUpdates.append(k.toString(), "1");
                     break;
@@ -1666,7 +1691,12 @@ public class MongoDocumentStore implements DocumentStore, RevisionListener {
     }
 
     @Override
-    public synchronized void updateAccessedRevision(RevisionVector revisions) {
+    public synchronized void updateAccessedRevision(RevisionVector revisions, int clusterId) {
+        if (localChanges == null && replicaInfo != null) {
+            localChanges = new LocalChanges(clusterId);
+            replicaInfo.addListener(localChanges);
+        }
+
         RevisionVector previousValue = mostRecentAccessedRevisions;
         if (mostRecentAccessedRevisions == null) {
             mostRecentAccessedRevisions = revisions;

@@ -22,7 +22,22 @@ import java.io.File;
 public class IOMonitorAdapter implements IOMonitor {
 
     @Override
-    public void onSegmentRead(File file, long msb, long lsb, int length) {
+    public void beforeSegmentRead(File file, long msb, long lsb, int length) {
+        // Intentionally left blank
+    }
+
+    @Override
+    public void afterSegmentRead(File file, long msb, long lsb, int length, long elapsed) {
+        // Intentionally left blank
+    }
+
+    @Override
+    public void beforeSegmentWrite(File file, long msb, long lsb, int length) {
+        // Intentionally left blank
+    }
+
+    @Override
+    public void afterSegmentWrite(File file, long msb, long lsb, int length, long elapsed) {
         // Intentionally left blank
     }
 

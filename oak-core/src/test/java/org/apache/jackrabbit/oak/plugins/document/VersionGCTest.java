@@ -29,22 +29,30 @@ import java.util.concurrent.TimeUnit;
 
 import javax.annotation.Nonnull;
 
+import com.google.common.collect.Lists;
+
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.plugins.document.VersionGarbageCollector.VersionGCStats;
 import org.apache.jackrabbit.oak.plugins.document.memory.MemoryDocumentStore;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
+import org.apache.jackrabbit.oak.spi.gc.GCMonitor;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.stats.Clock;
 import org.junit.After;
+import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 
 import static java.util.concurrent.TimeUnit.HOURS;
 import static java.util.concurrent.TimeUnit.MINUTES;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.slf4j.helpers.MessageFormatter.arrayFormat;
 
 public class VersionGCTest {
 
@@ -83,9 +91,13 @@ public class VersionGCTest {
 
     @After
     public void tearDown() throws Exception {
-        Revision.resetClockToDefault();
         execService.shutdown();
         execService.awaitTermination(1, MINUTES);
+    }
+
+    @AfterClass
+    public static void resetClock() {
+        Revision.resetClockToDefault();
     }
 
     @Test
@@ -132,6 +144,87 @@ public class VersionGCTest {
         gc.cancel();
         store.semaphore.release();
         assertTrue(stats.get().canceled);
+    }
+
+    @Test
+    public void cancelMustNotUpdateLastOldestTimeStamp() throws Exception {
+        // get previous entry from SETTINGS
+        String versionGCId = "versionGC";
+        String lastOldestTimeStampProp = "lastOldestTimeStamp";
+        Document statusBefore = store.find(Collection.SETTINGS, versionGCId);
+        // block gc call
+        store.semaphore.acquireUninterruptibly();
+        Future<VersionGCStats> stats = gc();
+        boolean gcBlocked = false;
+        for (int i = 0; i < 10; i ++) {
+            if (store.semaphore.hasQueuedThreads()) {
+                gcBlocked = true;
+                break;
+            }
+            Thread.sleep(100);
+        }
+        assertTrue(gcBlocked);
+        // now cancel the GC
+        gc.cancel();
+        store.semaphore.release();
+        assertTrue(stats.get().canceled);
+
+        // ensure a canceled GC doesn't update that versionGC SETTINGS entry
+        Document statusAfter = store.find(Collection.SETTINGS, "versionGC");
+        if (statusBefore == null) {
+            assertNull(statusAfter);
+        } else {
+            assertNotNull(statusAfter);
+            assertEquals(
+                    "canceled GC shouldn't change the " + lastOldestTimeStampProp + " property on " + versionGCId
+                            + " settings entry",
+                    statusBefore.get(lastOldestTimeStampProp), statusAfter.get(lastOldestTimeStampProp));
+        }
+    }
+
+    @Test
+    public void getInfo() throws Exception {
+        gc.gc(1, TimeUnit.HOURS);
+
+        gc.getInfo(1, TimeUnit.HOURS);
+    }
+
+    @Test
+    public void gcMonitorStatusUpdates() throws Exception {
+        final List<String> statusMessages = Lists.newArrayList();
+        GCMonitor monitor = new GCMonitor.Empty() {
+            @Override
+            public void updateStatus(String status) {
+                statusMessages.add(status);
+            }
+        };
+        gc.setGCMonitor(monitor);
+
+        gc.gc(30, TimeUnit.MINUTES);
+
+        List<String> expected = Lists.newArrayList("INITIALIZING",
+                "COLLECTING", "CHECKING", "COLLECTING", "DELETING", "SORTING",
+                "DELETING", "UPDATING", "SPLITS_CLEANUP", "IDLE");
+        assertEquals(expected, statusMessages);
+    }
+
+    @Test
+    public void gcMonitorInfoMessages() throws Exception {
+        final List<String> infoMessages = Lists.newArrayList();
+        GCMonitor monitor = new GCMonitor.Empty() {
+            @Override
+            public void info(String message, Object[] arguments) {
+                infoMessages.add(arrayFormat(message, arguments).getMessage());
+            }
+        };
+        gc.setGCMonitor(monitor);
+
+        gc.gc(1, TimeUnit.HOURS);
+
+        assertEquals(3, infoMessages.size());
+        assertTrue(infoMessages.get(0).startsWith("Looking at revisions"));
+        assertTrue(infoMessages.get(1).startsWith("Proceeding to reset"));
+        assertTrue(infoMessages.get(2).startsWith("Revision garbage collection finished"));
     }
 
     private Future<VersionGCStats> gc() {

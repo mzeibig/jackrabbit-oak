@@ -49,7 +49,7 @@ This implementation is the newest and the only actively maintained one, and shou
 The second and last configuration, identified by `org.apache.jackrabbit.oak.plugins.segment.SegmentNodeStoreService`, refers to the old implementation of the Node Store provided by the `oak-segment` bundle.
 This implementation has been deprecated, will not receive any further improvements and should not be used, if possible.
 
-##### org.apache.jackrabbit.oak.segment.SegmentNodeStoreService
+##### <a name="config-SegmentNodeStoreService"></a> org.apache.jackrabbit.oak.segment.SegmentNodeStoreService
 
 repository.home (string) - repository
 : A path on the file system where repository data will be stored.
@@ -243,6 +243,10 @@ db
 : Default - oak
 : Name of the database in Mongo
 
+socketKeepAlive
+: Default - false
+: Enables socket keep-alive for MongoDB connections
+
 cache
 : Default - 256
 : Cache size in MB. This is distributed among various caches used in DocumentNodeStore
@@ -433,6 +437,7 @@ All the above data stores enable local file system caching with the following pa
 * _PID `org.apache.jackrabbit.oak.plugins.blob.datastore.SharedS3DataStore`_
 * _PID `org.apache.jackrabbit.oak.plugins.blob.datastore.S3DataStore`_
 * _PID `org.apache.jackrabbit.oak.plugins.blob.datastore.FileDataStore`_
+* _PID `org.apache.jackrabbit.oak.plugins.blob.datastore.AzureDataStore`_
 
 cacheSize
 : Default - 68719476736
